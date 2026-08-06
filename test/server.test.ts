@@ -1,0 +1,305 @@
+import { createHmac } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { request } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Config } from "../src/config.js";
+import { MessageDedupe } from "../src/dedupe.js";
+import { FireflyClient } from "../src/integrations/firefly.js";
+import { HaClient } from "../src/integrations/homeAssistant.js";
+import { OpencodeClient } from "../src/integrations/opencode.js";
+import { RateLimiter } from "../src/rateLimit.js";
+import { SenderLock } from "../src/senderLock.js";
+import { SessionStore } from "../src/sessionStore.js";
+import { buildServer, type ServerDeps } from "../src/server.js";
+import type { IdentityResolver } from "../src/waha/identity.js";
+import type { WahaClientLike } from "../src/waha/client.js";
+
+const SECRET = "test-secret";
+
+function testConfig(): Config {
+  return {
+    port: 0,
+    allowedUsers: new Set(["111"]),
+    wahaBaseUrl: "http://waha.test",
+    wahaApiKey: "key",
+    wahaSession: "test",
+    webhookSecret: SECRET,
+    hassBaseUrl: "http://ha.test",
+    hassToken: "",
+    haWebhookId: "",
+    fireflyBaseUrl: "http://firefly.test",
+    fireflyPat: "",
+    fireflyDefaultSourceAccount: "",
+    opencodeBaseUrl: "http://opencode.test",
+    opencodeServerUsername: "opencode",
+    opencodeServerPassword: "",
+    opencodeAuthHeader: "",
+    opencodeModelProvider: "",
+    opencodeModelId: "",
+    opencodeAutoApprove: true,
+    sessionsFile: "",
+    maxBodyBytes: 64 * 1024,
+    rateLimitMax: 20,
+    rateLimitWindowMs: 5 * 60 * 1000,
+  };
+}
+
+function sign(body: string): string {
+  return createHmac("sha512", SECRET).update(body).digest("hex");
+}
+
+let dir: string;
+let config: Config;
+let deps: ServerDeps;
+let sentMessages: { chatId: string; text: string }[];
+let identity: IdentityResolver;
+let server: ReturnType<typeof buildServer>;
+let baseUrl: string;
+
+beforeEach(async () => {
+  dir = mkdtempSync(join(tmpdir(), "whatsapp-router-server-test-"));
+  config = { ...testConfig(), sessionsFile: join(dir, "sessions.json") };
+
+  sentMessages = [];
+  const waha: WahaClientLike = {
+    sendText: vi.fn().mockImplementation((chatId: string, text: string) => {
+      sentMessages.push({ chatId, text });
+      return Promise.resolve();
+    }),
+    fetchGroups: vi.fn().mockResolvedValue({}),
+    fetchSessionInfo: vi.fn().mockResolvedValue(null),
+  };
+
+  identity = {
+    ensureLidMap: vi.fn().mockResolvedValue(undefined),
+    ensureBotIds: vi.fn().mockResolvedValue(undefined),
+    resolvePhone: (jid) => jid?.split("@")[0],
+    isBotId: () => false,
+  };
+
+  deps = {
+    waha,
+    identity,
+    rateLimiter: new RateLimiter(config.rateLimitMax, config.rateLimitWindowMs),
+    dedupe: new MessageDedupe(5 * 60 * 1000),
+    router: {
+      ha: new HaClient(config.hassBaseUrl, config.hassToken, config.haWebhookId),
+      firefly: new FireflyClient(
+        config.fireflyBaseUrl,
+        config.fireflyPat,
+        config.fireflyDefaultSourceAccount,
+      ),
+      opencode: new OpencodeClient(config.opencodeBaseUrl, "Basic abc", "", "", true),
+      sessions: new SessionStore(config.sessionsFile),
+      senderLock: new SenderLock(),
+    },
+  };
+
+  server = buildServer(config, deps);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const { port } = server.address() as AddressInfo;
+  baseUrl = `http://127.0.0.1:${String(port)}`;
+});
+
+afterEach(async () => {
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
+  rmSync(dir, { recursive: true, force: true });
+  vi.unstubAllGlobals();
+});
+
+// Uses node:http directly rather than global fetch — tests stub global fetch
+// to control the router's own outbound calls (to opencode/firefly/etc.), and
+// that stub must not also intercept this test's request to our own server.
+function rawRequest(
+  path: string,
+  method: string,
+  body: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      `${baseUrl}${path}`,
+      { method, headers: { "Content-Type": "application/json", ...headers } },
+      (res) => {
+        res.resume();
+        res.on("end", () => {
+          resolve({ status: res.statusCode ?? 0 });
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+function postWebhook(body: string, headers: Record<string, string> = {}): Promise<{ status: number }> {
+  return rawRequest("/webhook", "POST", body, headers);
+}
+
+describe("server routing", () => {
+  it("returns 404 for a GET request", async () => {
+    const res = await rawRequest("/webhook", "GET", "");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 for the wrong path", async () => {
+    const res = await postWebhook("{}", { "X-Webhook-Hmac": sign("{}") });
+    const wrongPath = await rawRequest("/nope", "POST", "{}");
+    expect(wrongPath.status).toBe(404);
+    expect(res.status).toBe(200); // sanity: /webhook itself is fine
+  });
+});
+
+describe("server webhook auth", () => {
+  it("rejects a request with no signature", async () => {
+    const res = await postWebhook("{}");
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a request with a wrong signature", async () => {
+    const res = await postWebhook("{}", { "X-Webhook-Hmac": "wrong" });
+    expect(res.status).toBe(401);
+  });
+
+  it("accepts a correctly signed request", async () => {
+    const body = "{}";
+    const res = await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects a body over the size limit before checking the signature", async () => {
+    const oversized = JSON.stringify({ padding: "x".repeat(config.maxBodyBytes + 1) });
+    const res = await postWebhook(oversized, { "X-Webhook-Hmac": sign(oversized) });
+    expect(res.status).toBe(413);
+  });
+});
+
+function messageBody(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    event: "message",
+    payload: { id: "m1", from: "111@c.us", body: "hello", ...overrides },
+  });
+}
+
+describe("server message handling", () => {
+  it("ignores non-message events", async () => {
+    const body = JSON.stringify({ event: "state.change" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("ignores messages sent by the bot itself", async () => {
+    const body = messageBody({ fromMe: true });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("ignores messages from a sender not on the allowlist", async () => {
+    const body = messageBody({ from: "999@c.us" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("routes an allowlisted 1:1 message and replies via waha", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) {
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+        );
+      }),
+    );
+
+    const body = messageBody();
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "hi!" }]);
+  });
+
+  it("de-dupes a repeated delivery of the same message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) {
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+        );
+      }),
+    );
+
+    const body = messageBody();
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(sentMessages).toHaveLength(1);
+  });
+
+  it("rejects a group message when the bot isn't mentioned", async () => {
+    identity.isBotId = () => false;
+    const body = messageBody({ from: "group@g.us", participant: "111@c.us" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("routes a group message that mentions the bot from an allowlisted participant", async () => {
+    identity.isBotId = (id) => id === "botid";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) {
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+        );
+      }),
+    );
+
+    const body = messageBody({
+      from: "group@g.us",
+      participant: "111@c.us",
+      body: "@botid hello",
+      _data: {
+        message: { extendedTextMessage: { contextInfo: { mentionedJid: ["botid@lid"] } } },
+      },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "hi!" }]);
+  });
+
+  it("replies with a rate-limit message once the sender's limit is exceeded", async () => {
+    deps.rateLimiter = new RateLimiter(1, 5 * 60 * 1000);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) {
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+        );
+      }),
+    );
+
+    const first = messageBody({ id: "m1" });
+    const second = messageBody({ id: "m2" });
+    await postWebhook(first, { "X-Webhook-Hmac": sign(first) });
+    await postWebhook(second, { "X-Webhook-Hmac": sign(second) });
+
+    expect(sentMessages).toHaveLength(2);
+    expect(sentMessages[1]?.text).toBe("Rate limit reached — try again in a few minutes.");
+  });
+});

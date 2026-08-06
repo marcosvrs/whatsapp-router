@@ -1,0 +1,7 @@
+#!/bin/sh
+# Lints staged .ts files only — a native equivalent of lint-staged, no dependency needed.
+set -e
+if git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | grep -qz .; then
+  git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | xargs -0 npx eslint --fix
+  git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | xargs -0 git add
+fi

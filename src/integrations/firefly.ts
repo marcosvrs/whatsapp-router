@@ -1,0 +1,93 @@
+import { normalizeAmount } from "../amount.js";
+import { log } from "../log.js";
+
+interface FireflyAccount {
+  id: string;
+  attributes?: { name?: string };
+}
+
+interface FireflyAccountsResponse {
+  data?: FireflyAccount[];
+}
+
+// Success is cached (avoids a lookup on every "money:" message); failure is
+// not, since a typo in the configured source-account name lets Firefly's
+// source_name silently create a wrong account instead of failing loudly — so
+// we resolve the real id up front — but a transient Firefly outage shouldn't
+// wedge the feature until restart, so each call retries until it succeeds.
+export class FireflyClient {
+  private sourceAccountId: string | null = null;
+
+  constructor(
+    private readonly baseUrl: string,
+    private readonly token: string,
+    private readonly defaultSourceAccount: string,
+  ) {}
+
+  isConfigured(): boolean {
+    return Boolean(this.token && this.defaultSourceAccount);
+  }
+
+  private async resolveSourceAccountId(): Promise<string | null> {
+    if (this.sourceAccountId) return null;
+    try {
+      const res = await fetch(`${this.baseUrl}/api/v1/accounts?type=asset&limit=200`, {
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+      });
+      if (!res.ok) return `Firefly accounts lookup failed (${String(res.status)})`;
+      const data = (await res.json()) as FireflyAccountsResponse;
+      const match = (data.data ?? []).find(
+        (a) => a.attributes?.name === this.defaultSourceAccount,
+      );
+      if (!match) return `Firefly asset account "${this.defaultSourceAccount}" not found.`;
+      this.sourceAccountId = match.id;
+      return null;
+    } catch (err) {
+      return `Firefly accounts lookup failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  async logTransaction(text: string): Promise<string> {
+    if (!this.isConfigured()) return "Firefly III not configured yet.";
+
+    const match = /^\s*([\d.,]+)\s+(.+)$/.exec(text);
+    if (!match) {
+      return 'Format: "money: <amount> <description>", e.g. "money: 20 groceries"';
+    }
+    const rawAmount = match[1] ?? "";
+    const amount = normalizeAmount(rawAmount);
+    if (!amount) {
+      return `Couldn't parse amount "${rawAmount}" — use plain numbers, e.g. "money: 20.50 groceries".`;
+    }
+    const description = (match[2] ?? "").trim();
+
+    const lookupError = await this.resolveSourceAccountId();
+    if (lookupError) return lookupError;
+
+    const res = await fetch(`${this.baseUrl}/api/v1/transactions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${this.token}`,
+      },
+      body: JSON.stringify({
+        transactions: [
+          {
+            type: "withdrawal",
+            date: new Date().toISOString(),
+            amount,
+            description,
+            source_id: this.sourceAccountId,
+          },
+        ],
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      log("firefly failed", res.status, body);
+      return `Firefly transaction failed (${String(res.status)}).`;
+    }
+    return `Logged: ${amount} — ${description}`;
+  }
+}

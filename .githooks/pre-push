@@ -1,0 +1,2 @@
+#!/bin/sh
+gitleaks detect --redact -v && npm run typecheck && npm test

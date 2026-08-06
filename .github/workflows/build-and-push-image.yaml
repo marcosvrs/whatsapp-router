@@ -1,0 +1,84 @@
+name: Create and publish a Docker image
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Lint, Build & Test"]
+    types: ["completed"]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.ref_name || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        github.event.workflow_run.conclusion == 'success'
+      }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set workflow variables
+        id: vars
+        shell: bash
+        run: |
+          BRANCH_NAME="${{ github.event.workflow_run.head_branch || github.ref_name }}"
+          COMMIT_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+
+          SHOULD_PUSH=false
+          if [[ "$BRANCH_NAME" == "main" ]]; then
+            SHOULD_PUSH=true
+          fi
+
+          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "should_push=$SHOULD_PUSH" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.vars.outputs.commit_sha }}
+
+      - name: Log in to the Container registry
+        if: steps.vars.outputs.should_push == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.vars.outputs.branch_name }}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ steps.vars.outputs.branch_name == 'main' }}
+          labels: |
+            org.opencontainers.image.title=WhatsApp Router
+            org.opencontainers.image.description=Routes WhatsApp messages (via WAHA) to an AI coding agent, a budgeting app, and a home automation webhook.
+
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: ${{ steps.vars.outputs.should_push == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          pull: true
+          provenance: false
