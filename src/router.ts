@@ -9,13 +9,7 @@ import type { SessionStore } from "./sessionStore.js";
 // "text" replies go through waha.sendText; "reaction" replies react to the
 // original message instead — text is only attached to a reaction on failure,
 // so the sender knows what went wrong without a reply cluttering the chat.
-// "agent" replies are resolved lazily (via `resolve`) so the caller can send
-// a placeholder message first and edit it in place once the — potentially
-// slow — agent call actually finishes.
-export type RouteReply =
-  | { kind: "text"; text: string }
-  | { kind: "reaction"; emoji: string; text?: string }
-  | { kind: "agent"; resolve: () => Promise<string> };
+export type RouteReply = { kind: "text"; text: string } | { kind: "reaction"; emoji: string; text?: string };
 
 function actionReply(result: ActionResult): RouteReply {
   return result.ok
@@ -79,7 +73,7 @@ export async function routeMessage(
     deps.sessions.reset(senderKey);
     const rest = (newMatch[1] ?? "").trim();
     if (!rest && !media) return { kind: "text", text: "Started a new conversation." };
-    return { kind: "agent", resolve: () => handleAgent(deps, senderKey, rest, media) };
+    return { kind: "text", text: await handleAgent(deps, senderKey, rest, media) };
   }
 
   const haMatch = /^ha:(.*)$/i.exec(trimmed);
@@ -88,5 +82,5 @@ export async function routeMessage(
   const moneyMatch = /^money:(.*)$/i.exec(trimmed);
   if (moneyMatch) return actionReply(await deps.firefly.logTransaction((moneyMatch[1] ?? "").trim()));
 
-  return { kind: "agent", resolve: () => handleAgent(deps, senderKey, trimmed, media) };
+  return { kind: "text", text: await handleAgent(deps, senderKey, trimmed, media) };
 }

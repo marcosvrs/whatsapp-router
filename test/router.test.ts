@@ -103,9 +103,6 @@ describe("routeMessage — money: prefix", () => {
   });
 });
 
-// Agent-routed replies are lazy (`{kind: "agent", resolve}`) so the caller
-// can send a placeholder before the actual opencode call runs — tests need
-// to invoke resolve() themselves to trigger it and get the final text.
 async function agentText(
   deps: RouterDeps,
   senderKey: string,
@@ -113,8 +110,8 @@ async function agentText(
   media?: OpencodeMediaAttachment,
 ): Promise<string> {
   const reply = await routeMessage(deps, senderKey, text, media);
-  if (reply.kind !== "agent") throw new Error(`expected an agent reply, got ${reply.kind}`);
-  return reply.resolve();
+  if (reply.kind !== "text") throw new Error(`expected a text reply, got ${reply.kind}`);
+  return reply.text;
 }
 
 describe("routeMessage — default (agent)", () => {

@@ -9,7 +9,7 @@ prefix:
 | `/new [message]` | Resets the sender's conversation with the agent, optionally starting a new one immediately |
 | `ha: <text>` | A configured [Home Assistant](https://www.home-assistant.io/) webhook — reacts ✅/❌ on the original message instead of replying with text |
 | `money: <amount> <description>` | A [Firefly III](https://www.firefly-iii.org/) withdrawal transaction — reacts ✅/❌ on the original message instead of replying with text |
-| anything else | An [opencode](https://opencode.ai/) agent session (one persistent session per sender) — a placeholder reply is sent immediately and edited in place once the agent responds |
+| anything else | An [opencode](https://opencode.ai/) agent session (one persistent session per sender) — WhatsApp's own typing indicator shows while it's working, then the real reply is sent once, no placeholder |
 
 A failed `ha:`/`money:` reaction (❌) is followed by a text reply explaining
 what went wrong, so the sender knows why without cluttering the chat on the
@@ -133,9 +133,9 @@ src/
     opencode.ts                     wraps @opencode-ai/sdk
   allowlist.ts             who's allowed to trigger the bot, and from where
   router.ts                 prefix -> integration dispatch; returns a RouteReply
-                            (text / reaction / lazily-resolved agent reply)
+                            (text / reaction)
   server.ts                 HTTP wiring: auth, size limits, dedupe, rate limit,
-                            typing indicator, read receipts, placeholder+edit
+                            typing indicator, read receipts, media download
   index.ts                  composition root
 ```
 

@@ -154,16 +154,21 @@ describe("WahaClient.sendReaction", () => {
 });
 
 describe("WahaClient.editMessage", () => {
-  it("PUTs to the session-scoped message endpoint, URL-encoding chat and message ids", async () => {
+  // WAHA's own message ids are composite (confirmed against a live message:
+  // "true_<chatId>_<rawId>") — editMessage only ever targets a message this
+  // client itself just sent (WhatsApp doesn't allow editing others'
+  // messages), so fromMe is always "true". The raw id passed in is the same
+  // one given to sendText's `id` field.
+  it("PUTs to the fromMe-prefixed composite message id, URL-encoding chat id and the whole id", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const client = new WahaClient("http://waha.test", "key123", "MySession");
-    await client.editMessage("111@c.us", "true_111@c.us_ABC", "updated text");
+    await client.editMessage("111@c.us", "ABC123", "updated text");
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
-      "http://waha.test/api/MySession/chats/111%40c.us/messages/true_111%40c.us_ABC",
+      "http://waha.test/api/MySession/chats/111%40c.us/messages/true_111%40c.us_ABC123",
     );
     expect(init.method).toBe("PUT");
     expect(JSON.parse(init.body as string)).toEqual({ text: "updated text" });
@@ -190,6 +195,21 @@ describe("WahaClient.downloadMedia", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://waha.test/api/files/abc.jpg");
     expect(init.headers).toEqual({ "X-Api-Key": "key123" });
+  });
+
+  // WAHA can self-report media.url with the wrong host for this deployment
+  // (e.g. "http://localhost:3000/..." — meaningless from inside a different
+  // container). Trust this client's own configured baseUrl for the origin;
+  // only take the path from the url WAHA gave us.
+  it("rewrites the url's origin to this client's own baseUrl", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.downloadMedia("http://localhost:3000/api/files/Jarvis/abc.jpeg");
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://waha.test/api/files/Jarvis/abc.jpeg");
   });
 
   it("returns null and logs on a non-ok response", async () => {

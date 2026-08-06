@@ -227,12 +227,7 @@ describe("server message handling", () => {
     const body = messageBody();
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "…" }]);
-    expect(deps.waha.editMessage).toHaveBeenCalledWith(
-      "111@c.us",
-      expect.any(String),
-      "hi!",
-    );
+    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "hi!" }]);
   });
 
   it("de-dupes a repeated delivery of the same message", async () => {
@@ -288,12 +283,7 @@ describe("server message handling", () => {
     });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "…" }]);
-    expect(deps.waha.editMessage).toHaveBeenCalledWith(
-      "group@g.us",
-      expect.any(String),
-      "hi!",
-    );
+    expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "hi!" }]);
   });
 
   it("replies with a rate-limit message once the sender's limit is exceeded", async () => {
@@ -428,7 +418,7 @@ describe("server message handling", () => {
     ]);
   });
 
-  it("sends a placeholder message then edits it in place with the final agent reply", async () => {
+  it("shows a typing indicator and sends the agent's reply directly, with no placeholder", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
@@ -451,15 +441,9 @@ describe("server message handling", () => {
     const body = messageBody({ body: "hi there" });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sentMessages).toHaveLength(1);
-    const sendCall = (deps.waha.sendText as ReturnType<typeof vi.fn>).mock.calls[0] as [
-      string,
-      string,
-      string,
-    ];
-    const [, , placeholderId] = sendCall;
-    expect(placeholderId).toBeTruthy();
-    expect(deps.waha.editMessage).toHaveBeenCalledWith("111@c.us", placeholderId, "final reply");
+    expect(deps.waha.startTyping).toHaveBeenCalledWith("111@c.us");
+    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "final reply" }]);
+    expect(deps.waha.editMessage).not.toHaveBeenCalled();
   });
 
   it("downloads and forwards an image with a caption to the agent", async () => {
@@ -526,11 +510,7 @@ describe("server message handling", () => {
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
     expect(deps.waha.downloadMedia).toHaveBeenCalledWith("http://waha.test/api/files/m1.pdf");
-    expect(deps.waha.editMessage).toHaveBeenCalledWith(
-      "111@c.us",
-      expect.any(String),
-      "got the file",
-    );
+    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "got the file" }]);
   });
 
   it("does not attempt a download when WAHA itself failed to fetch the media", async () => {

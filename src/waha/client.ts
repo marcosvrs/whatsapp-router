@@ -81,10 +81,15 @@ export class WahaClient implements WahaClientLike {
     await this.logIfFailed("sendReaction", res);
   }
 
+  // WAHA's real message ids are composite ("true_<chatId>_<rawId>", confirmed
+  // against a live message) — editMessage only ever targets a message this
+  // client itself just sent, so fromMe is always "true". `messageId` is the
+  // same raw id passed to sendText's `id` field.
   async editMessage(chatId: string, messageId: string, text: string): Promise<void> {
+    const composedId = `true_${chatId}_${messageId}`;
     const res = await this.call(
       "PUT",
-      `/api/${this.session}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
+      `/api/${this.session}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(composedId)}`,
       { text },
     );
     await this.logIfFailed("editMessage", res);
@@ -107,10 +112,16 @@ export class WahaClient implements WahaClientLike {
   }
 
   // `url` is the absolute URL WAHA reported in the message payload's
-  // media.url field (not necessarily under this.baseUrl's path scheme).
+  // media.url field — its host can't be trusted (WAHA has reported
+  // "localhost", meaningless from inside a different container), so only
+  // the path is kept; the origin always comes from this client's own
+  // configured baseUrl.
   async downloadMedia(url: string): Promise<string | null> {
     try {
-      const res = await fetch(url, { headers: { "X-Api-Key": this.apiKey } });
+      const parsed = new URL(url);
+      const res = await fetch(`${this.baseUrl}${parsed.pathname}${parsed.search}`, {
+        headers: { "X-Api-Key": this.apiKey },
+      });
       if (!res.ok) {
         log("downloadMedia failed", res.status, await res.text().catch(() => ""));
         return null;
