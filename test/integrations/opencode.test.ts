@@ -113,6 +113,40 @@ describe("OpencodeClient.send", () => {
     });
   });
 
+  it("attaches a file part alongside the text part when media is provided", async () => {
+    sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
+    await client().send("ses_1", "check this out", {
+      mimetype: "image/jpeg",
+      dataBase64: "Zm9v",
+      filename: "photo.jpg",
+    });
+
+    expect(sessionPrompt).toHaveBeenCalledWith({
+      path: { id: "ses_1" },
+      body: {
+        parts: [
+          { type: "text", text: "check this out" },
+          { type: "file", mime: "image/jpeg", filename: "photo.jpg", url: "data:image/jpeg;base64,Zm9v" },
+        ],
+      },
+    });
+  });
+
+  it("sends only the file part when there is media but no caption text", async () => {
+    sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
+    await client().send("ses_1", "", {
+      mimetype: "application/pdf",
+      dataBase64: "YmFy",
+    });
+
+    expect(sessionPrompt).toHaveBeenCalledWith({
+      path: { id: "ses_1" },
+      body: {
+        parts: [{ type: "file", mime: "application/pdf", filename: undefined, url: "data:application/pdf;base64,YmFy" }],
+      },
+    });
+  });
+
   it("returns the concatenated text parts of a successful reply", async () => {
     sessionPrompt.mockResolvedValue(
       ok({

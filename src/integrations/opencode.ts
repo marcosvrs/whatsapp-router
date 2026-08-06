@@ -1,8 +1,10 @@
 import {
   createOpencodeClient,
   type AssistantMessage,
+  type FilePartInput,
   type OpencodeClient as SdkClient,
   type Part,
+  type TextPartInput,
 } from "@opencode-ai/sdk";
 import { log } from "../log.js";
 
@@ -11,6 +13,12 @@ export interface OpencodeClientOptions {
   authHeader: string;
   modelProvider: string;
   modelId: string;
+}
+
+export interface OpencodeMediaAttachment {
+  mimetype: string;
+  dataBase64: string;
+  filename?: string;
 }
 
 // Every error variant has a `name`; only some also have a string `data.message`
@@ -55,11 +63,21 @@ export class OpencodeClient {
     return data.id;
   }
 
-  private promptMessage(sessionId: string, text: string) {
+  private promptMessage(sessionId: string, text: string, media?: OpencodeMediaAttachment) {
+    const parts: (TextPartInput | FilePartInput)[] = [];
+    if (text) parts.push({ type: "text", text });
+    if (media) {
+      parts.push({
+        type: "file",
+        mime: media.mimetype,
+        filename: media.filename,
+        url: `data:${media.mimetype};base64,${media.dataBase64}`,
+      });
+    }
     return this.client.session.prompt({
       path: { id: sessionId },
       body: {
-        parts: [{ type: "text", text }],
+        parts,
         ...(this.modelProvider && this.modelId
           ? { model: { providerID: this.modelProvider, modelID: this.modelId } }
           : {}),
@@ -67,16 +85,22 @@ export class OpencodeClient {
     });
   }
 
-  // Sends text to an existing session; if the session is stale (404 — e.g. the
-  // opencode server restarted / db reset), creates a fresh one and retries once.
-  // Returns the session id actually used, so the caller can persist it if it changed.
-  async send(sessionId: string, text: string): Promise<{ sessionId: string; reply: string }> {
+  // Sends text (and optionally one media attachment, e.g. an image/document
+  // forwarded from WhatsApp) to an existing session; if the session is stale
+  // (404 — e.g. the opencode server restarted / db reset), creates a fresh
+  // one and retries once. Returns the session id actually used, so the
+  // caller can persist it if it changed.
+  async send(
+    sessionId: string,
+    text: string,
+    media?: OpencodeMediaAttachment,
+  ): Promise<{ sessionId: string; reply: string }> {
     let currentSessionId = sessionId;
-    let result = await this.promptMessage(currentSessionId, text);
+    let result = await this.promptMessage(currentSessionId, text, media);
 
     if (result.response.status === 404) {
       currentSessionId = await this.createSession();
-      result = await this.promptMessage(currentSessionId, text);
+      result = await this.promptMessage(currentSessionId, text, media);
     }
 
     if (!result.data) {

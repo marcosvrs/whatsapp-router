@@ -10,12 +10,20 @@ import type { IdentityResolver } from "./waha/identity.js";
 import type { WahaClientLike } from "./waha/client.js";
 import { messageDedupeKey, stripMentions, type WahaMessage, type WahaWebhookPayload } from "./waha/payload.js";
 import { routeMessage, type RouterDeps } from "./router.js";
+import type { OpencodeMediaAttachment } from "./integrations/opencode.js";
 
 // A WAHA message id we choose ourselves — sent as the placeholder's id so we
 // can edit that exact message once the (potentially slow) agent call resolves,
 // instead of depending on parsing an id back out of the send response.
 function generateMessageId(): string {
   return randomBytes(10).toString("hex").toUpperCase();
+}
+
+// WAHA reports hasMedia:true even when it couldn't fetch the file itself
+// (media.error set, media.url null) — only worth downloading when there's an
+// actual url to fetch.
+function hasDownloadableMedia(msg: WahaMessage): boolean {
+  return Boolean(msg.hasMedia && msg.media?.url && !msg.media.error);
 }
 
 export interface ServerDeps {
@@ -49,7 +57,8 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       const from = msg.from;
       const isGroupMessage = (from ?? "").endsWith("@g.us");
       let text = msg.body ?? "";
-      if (!text) return;
+      const mediaAvailable = hasDownloadableMedia(msg);
+      if (!text && !mediaAvailable) return;
       if (deps.dedupe.alreadyProcessed(messageDedupeKey(msg))) return;
 
       const senderKey = await resolveAllowedSender(deps.identity, config.allowedUsers, from, msg);
@@ -76,7 +85,20 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
 
       log("inbound", from, JSON.stringify(text).slice(0, 200));
       await deps.waha.startTyping(from ?? "");
-      const reply = await routeMessage(deps.router, senderKey, text);
+
+      let media: OpencodeMediaAttachment | undefined;
+      if (mediaAvailable && msg.media?.url) {
+        const dataBase64 = await deps.waha.downloadMedia(msg.media.url);
+        if (dataBase64) {
+          media = {
+            mimetype: msg.media.mimetype ?? "application/octet-stream",
+            dataBase64,
+            filename: msg.media.filename ?? undefined,
+          };
+        }
+      }
+
+      const reply = await routeMessage(deps.router, senderKey, text, media);
       if (reply.kind === "reaction") {
         await deps.waha.sendReaction(msg.id ?? "", reply.emoji);
         if (reply.text) await deps.waha.sendText(from ?? "", reply.text);

@@ -178,6 +178,71 @@ describe("WahaClient.editMessage", () => {
   });
 });
 
+describe("WahaClient.downloadMedia", () => {
+  it("fetches the given url with the api key header and returns base64-encoded bytes", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(new Uint8Array([1, 2, 3])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    const result = await client.downloadMedia("http://waha.test/api/files/abc.jpg");
+
+    expect(result).toBe(Buffer.from([1, 2, 3]).toString("base64"));
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://waha.test/api/files/abc.jpg");
+    expect(init.headers).toEqual({ "X-Api-Key": "key123" });
+  });
+
+  it("returns null and logs on a non-ok response", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    const result = await client.downloadMedia("http://waha.test/api/files/abc.jpg");
+
+    expect(result).toBeNull();
+    const args = logSpy.mock.calls[0] as unknown[];
+    expect(args.slice(1)).toEqual(["downloadMedia failed", 500, "oops"]);
+  });
+
+  it("returns null and logs when the fetch itself rejects", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    const result = await client.downloadMedia("http://waha.test/api/files/abc.jpg");
+
+    expect(result).toBeNull();
+    const args = logSpy.mock.calls[0] as unknown[];
+    expect(args.slice(1)).toEqual(["downloadMedia failed", "network down"]);
+  });
+
+  it("falls back to an empty string when reading the failure body itself rejects", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const badResponse = new Response(null, { status: 500 });
+    vi.spyOn(badResponse, "text").mockRejectedValue(new Error("stream error"));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(badResponse));
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    const result = await client.downloadMedia("http://waha.test/api/files/abc.jpg");
+
+    expect(result).toBeNull();
+    const args = logSpy.mock.calls[0] as unknown[];
+    expect(args.slice(1)).toEqual(["downloadMedia failed", 500, ""]);
+  });
+
+  it("stringifies a non-Error rejection", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue("connection reset"));
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    const result = await client.downloadMedia("http://waha.test/api/files/abc.jpg");
+
+    expect(result).toBeNull();
+    const args = logSpy.mock.calls[0] as unknown[];
+    expect(args.slice(1)).toEqual(["downloadMedia failed", "connection reset"]);
+  });
+});
+
 describe("WahaClient.fetchGroups", () => {
   it("requests the session-scoped groups endpoint with the api key header", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({})));

@@ -24,6 +24,7 @@ export interface WahaClientLike {
   editMessage: (chatId: string, messageId: string, text: string) => Promise<void>;
   fetchGroups: () => Promise<Record<string, WahaGroup>>;
   fetchSessionInfo: () => Promise<WahaSessionInfo | null>;
+  downloadMedia: (url: string) => Promise<string | null>;
 }
 
 export class WahaClient implements WahaClientLike {
@@ -103,5 +104,21 @@ export class WahaClient implements WahaClientLike {
     });
     if (!res.ok) return null;
     return (await res.json()) as WahaSessionInfo;
+  }
+
+  // `url` is the absolute URL WAHA reported in the message payload's
+  // media.url field (not necessarily under this.baseUrl's path scheme).
+  async downloadMedia(url: string): Promise<string | null> {
+    try {
+      const res = await fetch(url, { headers: { "X-Api-Key": this.apiKey } });
+      if (!res.ok) {
+        log("downloadMedia failed", res.status, await res.text().catch(() => ""));
+        return null;
+      }
+      return Buffer.from(await res.arrayBuffer()).toString("base64");
+    } catch (err) {
+      log("downloadMedia failed", err instanceof Error ? err.message : String(err));
+      return null;
+    }
   }
 }

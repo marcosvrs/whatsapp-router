@@ -1,7 +1,7 @@
 import type { ActionResult } from "./actionResult.js";
 import type { FireflyClient } from "./integrations/firefly.js";
 import type { HaClient } from "./integrations/homeAssistant.js";
-import type { OpencodeClient } from "./integrations/opencode.js";
+import type { OpencodeClient, OpencodeMediaAttachment } from "./integrations/opencode.js";
 import { log } from "./log.js";
 import type { SenderLock } from "./senderLock.js";
 import type { SessionStore } from "./sessionStore.js";
@@ -36,7 +36,12 @@ export interface RouterDeps {
   senderLock: SenderLock;
 }
 
-async function handleAgent(deps: RouterDeps, senderKey: string, text: string): Promise<string> {
+async function handleAgent(
+  deps: RouterDeps,
+  senderKey: string,
+  text: string,
+  media?: OpencodeMediaAttachment,
+): Promise<string> {
   if (!deps.opencode.isConfigured()) return "opencode agent not configured yet.";
   try {
     return await deps.senderLock.run(senderKey, async () => {
@@ -45,7 +50,7 @@ async function handleAgent(deps: RouterDeps, senderKey: string, text: string): P
         sessionId = await deps.opencode.createSession();
         deps.sessions.set(senderKey, sessionId);
       }
-      const result = await deps.opencode.send(sessionId, text);
+      const result = await deps.opencode.send(sessionId, text, media);
       if (result.sessionId !== sessionId) {
         deps.sessions.set(senderKey, result.sessionId);
       }
@@ -58,11 +63,14 @@ async function handleAgent(deps: RouterDeps, senderKey: string, text: string): P
 }
 
 // "/new" resets the sender's session; "ha:"/"money:" dispatch to their
-// integration; anything else falls through to the agent.
+// integration; anything else falls through to the agent. An image/document
+// attached to the message (any route except /new and the fallback ignores it —
+// ha:/money: aren't media-aware) rides along to the agent as a file part.
 export async function routeMessage(
   deps: RouterDeps,
   senderKey: string,
   text: string,
+  media?: OpencodeMediaAttachment,
 ): Promise<RouteReply> {
   const trimmed = text.trim();
 
@@ -70,8 +78,8 @@ export async function routeMessage(
   if (newMatch) {
     deps.sessions.reset(senderKey);
     const rest = (newMatch[1] ?? "").trim();
-    if (!rest) return { kind: "text", text: "Started a new conversation." };
-    return { kind: "agent", resolve: () => handleAgent(deps, senderKey, rest) };
+    if (!rest && !media) return { kind: "text", text: "Started a new conversation." };
+    return { kind: "agent", resolve: () => handleAgent(deps, senderKey, rest, media) };
   }
 
   const haMatch = /^ha:(.*)$/i.exec(trimmed);
@@ -80,5 +88,5 @@ export async function routeMessage(
   const moneyMatch = /^money:(.*)$/i.exec(trimmed);
   if (moneyMatch) return actionReply(await deps.firefly.logTransaction((moneyMatch[1] ?? "").trim()));
 
-  return { kind: "agent", resolve: () => handleAgent(deps, senderKey, trimmed) };
+  return { kind: "agent", resolve: () => handleAgent(deps, senderKey, trimmed, media) };
 }

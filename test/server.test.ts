@@ -73,6 +73,7 @@ beforeEach(async () => {
     editMessage: vi.fn().mockResolvedValue(undefined),
     fetchGroups: vi.fn().mockResolvedValue({}),
     fetchSessionInfo: vi.fn().mockResolvedValue(null),
+    downloadMedia: vi.fn().mockResolvedValue(null),
   };
 
   identity = {
@@ -461,6 +462,119 @@ describe("server message handling", () => {
     expect(deps.waha.editMessage).toHaveBeenCalledWith("111@c.us", placeholderId, "final reply");
   });
 
+  it("downloads and forwards an image with a caption to the agent", async () => {
+    (deps.waha.downloadMedia as ReturnType<typeof vi.fn>).mockResolvedValue("Zm9v");
+    let capturedBody: unknown;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) {
+          return new Response(JSON.stringify({ id: "ses_1" }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        capturedBody = JSON.parse(await (input as Request).clone().text()) as unknown;
+        return new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "nice!" }] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+
+    const body = messageBody({
+      body: "check this out",
+      hasMedia: true,
+      media: { url: "http://waha.test/api/files/m1.jpg", mimetype: "image/jpeg", filename: null },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.downloadMedia).toHaveBeenCalledWith("http://waha.test/api/files/m1.jpg");
+    expect(capturedBody).toMatchObject({
+      parts: [
+        { type: "text", text: "check this out" },
+        { type: "file", mime: "image/jpeg", url: "data:image/jpeg;base64,Zm9v" },
+      ],
+    });
+  });
+
+  it("processes a media-only message with no caption instead of dropping it", async () => {
+    (deps.waha.downloadMedia as ReturnType<typeof vi.fn>).mockResolvedValue("YmFy");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "ses_1" }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "got the file" }] }), {
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    const body = messageBody({
+      body: "",
+      hasMedia: true,
+      media: { url: "http://waha.test/api/files/m1.pdf", mimetype: "application/pdf", filename: "doc.pdf" },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.downloadMedia).toHaveBeenCalledWith("http://waha.test/api/files/m1.pdf");
+    expect(deps.waha.editMessage).toHaveBeenCalledWith(
+      "111@c.us",
+      expect.any(String),
+      "got the file",
+    );
+  });
+
+  it("does not attempt a download when WAHA itself failed to fetch the media", async () => {
+    const body = messageBody({
+      body: "",
+      hasMedia: true,
+      media: { url: null, mimetype: "image/jpeg", filename: null, error: "download failed" },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.downloadMedia).not.toHaveBeenCalled();
+    // No text and no usable media — nothing worth forwarding to the agent.
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("falls back to text-only when the media download itself fails", async () => {
+    (deps.waha.downloadMedia as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    let capturedBody: unknown;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) {
+          return new Response(JSON.stringify({ id: "ses_1" }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        capturedBody = JSON.parse(await (input as Request).clone().text()) as unknown;
+        return new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "ok" }] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+
+    const body = messageBody({
+      body: "check this out",
+      hasMedia: true,
+      media: { url: "http://waha.test/api/files/m1.jpg", mimetype: "image/jpeg", filename: null },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(capturedBody).toMatchObject({ parts: [{ type: "text", text: "check this out" }] });
+  });
+
   it("does not strip @-mention markup from a 1:1 message", async () => {
     vi.stubGlobal(
       "fetch",
@@ -479,7 +593,7 @@ describe("server message handling", () => {
     const body = messageBody({ body: "@someone check this out" });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sendSpy).toHaveBeenCalledWith("ses_1", "@someone check this out");
+    expect(sendSpy).toHaveBeenCalledWith("ses_1", "@someone check this out", undefined);
   });
 
   it("does not crash and logs on malformed JSON, after already responding 200", async () => {

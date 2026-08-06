@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FireflyClient } from "../src/integrations/firefly.js";
 import { HaClient } from "../src/integrations/homeAssistant.js";
-import { OpencodeClient } from "../src/integrations/opencode.js";
+import { OpencodeClient, type OpencodeMediaAttachment } from "../src/integrations/opencode.js";
 import { routeMessage, type RouterDeps } from "../src/router.js";
 import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
@@ -106,8 +106,13 @@ describe("routeMessage — money: prefix", () => {
 // Agent-routed replies are lazy (`{kind: "agent", resolve}`) so the caller
 // can send a placeholder before the actual opencode call runs — tests need
 // to invoke resolve() themselves to trigger it and get the final text.
-async function agentText(deps: RouterDeps, senderKey: string, text: string): Promise<string> {
-  const reply = await routeMessage(deps, senderKey, text);
+async function agentText(
+  deps: RouterDeps,
+  senderKey: string,
+  text: string,
+  media?: OpencodeMediaAttachment,
+): Promise<string> {
+  const reply = await routeMessage(deps, senderKey, text, media);
   if (reply.kind !== "agent") throw new Error(`expected an agent reply, got ${reply.kind}`);
   return reply.resolve();
 }
@@ -207,5 +212,64 @@ describe("routeMessage — default (agent)", () => {
     expect(reply).toBe("handled");
     // "/new" only matches at a word boundary — session must NOT have been reset.
     expect(deps.sessions.get("111")).not.toBeUndefined();
+  });
+
+  it("forwards an attached image/document to the agent as a file part", async () => {
+    const media: OpencodeMediaAttachment = { mimetype: "image/jpeg", dataBase64: "Zm9v" };
+    let capturedBody: unknown;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return jsonResponse({ id: "ses_1" });
+        capturedBody = JSON.parse(await (input as Request).clone().text()) as unknown;
+        return jsonResponse({ info: {}, parts: [{ type: "text", text: "nice photo!" }] });
+      }),
+    );
+
+    const reply = await agentText(deps, "111", "check this out", media);
+
+    expect(reply).toBe("nice photo!");
+    expect(capturedBody).toMatchObject({
+      parts: [
+        { type: "text", text: "check this out" },
+        { type: "file", mime: "image/jpeg", url: "data:image/jpeg;base64,Zm9v" },
+      ],
+    });
+  });
+
+  it("forwards media with no caption text as the only part", async () => {
+    const media: OpencodeMediaAttachment = { mimetype: "application/pdf", dataBase64: "YmFy" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "got it" }] }));
+      }),
+    );
+
+    const reply = await agentText(deps, "111", "", media);
+    expect(reply).toBe("got it");
+  });
+});
+
+describe("routeMessage — /new with media", () => {
+  it("forwards to the agent (instead of the plain reset confirmation) when media is attached without trailing text", async () => {
+    const media: OpencodeMediaAttachment = { mimetype: "image/jpeg", dataBase64: "Zm9v" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "new session, got it" }] }));
+      }),
+    );
+    deps.sessions.set("111", "ses_old");
+
+    const reply = await agentText(deps, "111", "/new", media);
+
+    expect(reply).toBe("new session, got it");
+    expect(deps.sessions.get("111")).toBe("ses_new");
   });
 });

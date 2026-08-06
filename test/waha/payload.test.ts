@@ -19,6 +19,19 @@ function mentionMessage(mentionedJid: string[], body: string): WahaMessage {
   };
 }
 
+function mediaCaptionMentionMessage(
+  kind: "imageMessage" | "documentMessage" | "videoMessage",
+  mentionedJid: string[],
+): WahaMessage {
+  return {
+    id: "msg3",
+    from: "group@g.us",
+    body: "@999888777666555 check this out",
+    hasMedia: true,
+    _data: { message: { [kind]: { contextInfo: { mentionedJid } } } },
+  };
+}
+
 describe("extractMentionedIds", () => {
   it("returns an empty array for a plain text message", () => {
     expect(extractMentionedIds(plainMessage())).toEqual([]);
@@ -38,6 +51,33 @@ describe("extractMentionedIds", () => {
 
   it("returns an empty array for a completely empty message object", () => {
     expect(extractMentionedIds({})).toEqual([]);
+  });
+
+  it("extracts mentions from an image caption's contextInfo", () => {
+    const msg = mediaCaptionMentionMessage("imageMessage", ["999888777666555@lid"]);
+    expect(extractMentionedIds(msg)).toEqual(["999888777666555"]);
+  });
+
+  it("extracts mentions from a document caption's contextInfo", () => {
+    const msg = mediaCaptionMentionMessage("documentMessage", ["111@c.us"]);
+    expect(extractMentionedIds(msg)).toEqual(["111"]);
+  });
+
+  it("extracts mentions from a video caption's contextInfo", () => {
+    const msg = mediaCaptionMentionMessage("videoMessage", ["222@c.us"]);
+    expect(extractMentionedIds(msg)).toEqual(["222"]);
+  });
+
+  it("prefers extendedTextMessage's contextInfo when somehow multiple message types are present", () => {
+    const msg: WahaMessage = {
+      _data: {
+        message: {
+          extendedTextMessage: { contextInfo: { mentionedJid: ["1@c.us"] } },
+          imageMessage: { contextInfo: { mentionedJid: ["2@c.us"] } },
+        },
+      },
+    };
+    expect(extractMentionedIds(msg)).toEqual(["1"]);
   });
 });
 

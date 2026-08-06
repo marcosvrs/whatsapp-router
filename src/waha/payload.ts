@@ -1,3 +1,16 @@
+interface WahaMessageContextInfo {
+  contextInfo?: {
+    mentionedJid?: string[];
+  };
+}
+
+export interface WahaMessageMedia {
+  url?: string | null;
+  mimetype?: string;
+  filename?: string | null;
+  error?: string | null;
+}
+
 export interface WahaMessage {
   id?: string;
   from?: string;
@@ -5,13 +18,18 @@ export interface WahaMessage {
   body?: string;
   timestamp?: number;
   participant?: string;
+  hasMedia?: boolean;
+  media?: WahaMessageMedia;
   _data?: {
     message?: {
-      extendedTextMessage?: {
-        contextInfo?: {
-          mentionedJid?: string[];
-        };
-      };
+      extendedTextMessage?: WahaMessageContextInfo;
+      // Mirrors extendedTextMessage's shape per WhatsApp's standard (Baileys)
+      // protocol — unlike the text case above, this hasn't been confirmed
+      // against a live payload, so verify against a real mentioned-in-caption
+      // message if group mention detection on media doesn't work as expected.
+      imageMessage?: WahaMessageContextInfo;
+      documentMessage?: WahaMessageContextInfo;
+      videoMessage?: WahaMessageContextInfo;
     };
   };
 }
@@ -26,11 +44,17 @@ export function stripJidSuffix(jid: string | undefined): string {
 }
 
 // Confirmed against a live payload: an @-mentioned plain-text message arrives
-// as _data.message.extendedTextMessage.contextInfo.mentionedJid. Other message
-// types (image/video captions, replies) aren't handled — untested shapes, so
-// left alone rather than guessed at.
+// as _data.message.extendedTextMessage.contextInfo.mentionedJid. Image/document/
+// video captions are assumed to mirror that shape under their own message-type
+// key (see the caveat on WahaMessage) — replies aren't handled at all, still
+// untested/unguessed at.
 export function extractMentionedIds(msg: WahaMessage): string[] {
-  const mentioned = msg._data?.message?.extendedTextMessage?.contextInfo?.mentionedJid;
+  const message = msg._data?.message;
+  const mentioned =
+    message?.extendedTextMessage?.contextInfo?.mentionedJid ??
+    message?.imageMessage?.contextInfo?.mentionedJid ??
+    message?.documentMessage?.contextInfo?.mentionedJid ??
+    message?.videoMessage?.contextInfo?.mentionedJid;
   return Array.isArray(mentioned) ? mentioned.map(stripJidSuffix) : [];
 }
 

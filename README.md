@@ -17,7 +17,10 @@ success path. Every inbound message also gets a WhatsApp read receipt, and a
 typing indicator shows while the agent is working.
 
 Works in a 1:1 chat with the bot, or in any group it's added to — as long as
-the sender is allowlisted and @-mentions the bot.
+the sender is allowlisted and @-mentions the bot. Images and documents are
+downloaded and forwarded to the opencode agent as an attachment (alongside
+any caption text as the message); `ha:`/`money:` aren't media-aware, so an
+attachment on one of those is simply ignored.
 
 ## Why this exists
 
@@ -122,8 +125,8 @@ src/
   actionResult.ts           { ok, text } shape shared by ha:/money: integrations
   rateLimit.ts, dedupe.ts, senderLock.ts, sessionStore.ts
   waha/
-    client.ts              WAHA REST API wrapper — send/react/edit/typing/read-receipts
-    payload.ts              parsing WAHA's raw webhook payload (mentions, dedupe key)
+    client.ts              WAHA REST API wrapper — send/react/edit/typing/read-receipts/media
+    payload.ts              parsing WAHA's raw webhook payload (mentions, media, dedupe key)
     identity.ts              @lid <-> phone resolution, bot's own id (for mention detection)
   integrations/
     firefly.ts, homeAssistant.ts   plain fetch, return ActionResult
@@ -142,10 +145,14 @@ a running WAHA/opencode/Firefly/Home Assistant instance in the loop.
 
 ## Known limitation
 
-Mention detection only recognizes plain-text messages
+Mention detection recognizes plain-text messages
 (`extendedTextMessage.contextInfo.mentionedJid`, confirmed against a live WAHA
-payload). A mention inside an image/video caption or a reply uses a different
-message shape and isn't handled — left alone rather than guessed at.
+payload) and, on the assumption it mirrors that same shape, image/document/video
+captions (`imageMessage`/`documentMessage`/`videoMessage.contextInfo.mentionedJid`
+— **not** independently confirmed against a live payload; if @-mentioning the
+bot in a group photo/document caption doesn't work, this is the first thing to
+check). A mention inside a reply uses a different message shape and isn't
+handled at all — left alone rather than guessed at.
 
 ## License
 
