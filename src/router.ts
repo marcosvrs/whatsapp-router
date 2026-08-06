@@ -3,6 +3,7 @@ import type { FireflyClient } from "./integrations/firefly.js";
 import type { HaClient } from "./integrations/homeAssistant.js";
 import type { OpencodeClient, OpencodeMediaAttachment } from "./integrations/opencode.js";
 import { log } from "./log.js";
+import { markdownToWhatsapp } from "./markdownToWhatsapp.js";
 import type { SenderLock } from "./senderLock.js";
 import type { SessionStore } from "./sessionStore.js";
 
@@ -92,7 +93,11 @@ async function handleAgent(
       if (result.sessionId !== sessionId) {
         deps.sessions.set(senderKey, result.sessionId);
       }
-      return result.reply;
+      // The agent's own reply is LLM-generated Markdown — WhatsApp uses a
+      // different, much smaller formatting syntax (see markdownToWhatsapp.ts).
+      // Our own fallback strings (below, and on the error paths) are already
+      // plain text and don't need it.
+      return markdownToWhatsapp(result.reply);
     });
   } catch (err) {
     log("opencode call failed", err instanceof Error ? err.message : String(err));

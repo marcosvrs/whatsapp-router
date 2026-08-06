@@ -130,6 +130,22 @@ describe("routeMessage — default (agent)", () => {
     expect(deps.sessions.get("111")).toBe("ses_1");
   });
 
+  it("converts the agent's Markdown reply to WhatsApp formatting before returning it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        return Promise.resolve(
+          jsonResponse({ info: {}, parts: [{ type: "text", text: "This is **bold** and *italic*." }] }),
+        );
+      }),
+    );
+
+    const reply = await agentText(deps, "111", "hi there");
+    expect(reply).toBe("This is *bold* and _italic_.");
+  });
+
   it("reuses an existing session instead of creating a new one", async () => {
     deps.sessions.set("111", "ses_existing");
     const fetchMock = vi

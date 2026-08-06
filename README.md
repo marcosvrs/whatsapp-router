@@ -35,6 +35,11 @@ it's replying to, and any shared location — everything WAHA exposes about
 the message that's actually worth telling the agent, without dumping raw
 payload noise into its context.
 
+The agent's reply comes back as standard Markdown, but WhatsApp renders its
+own smaller formatting syntax (single `*bold*`, `_italic_`, `~strike~`,
+triple-backtick monospace only). Replies are converted before sending —
+see `markdownToWhatsapp.ts`.
+
 ## Why this exists
 
 WAHA is purely a WhatsApp transport layer (send/receive, sessions, media) —
@@ -148,9 +153,12 @@ src/
     opencode.ts                     wraps @opencode-ai/sdk; send() takes optional
                                     media + a system-context string
   allowlist.ts             who's allowed to trigger the bot, and from where
+  markdownToWhatsapp.ts    converts the agent's Markdown reply to WhatsApp's
+                            own formatting syntax
   router.ts                 prefix -> integration dispatch; returns a RouteReply
                             (text / reaction); builds the agent's system context
-                            from an AgentContext (who/where/when)
+                            from an AgentContext (who/where/when); converts the
+                            agent's reply via markdownToWhatsapp before returning it
   server.ts                 HTTP wiring: auth, size limits, dedupe, rate limit,
                             typing indicator, read receipts, media download,
                             agent-context extraction
