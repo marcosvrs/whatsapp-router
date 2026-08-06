@@ -62,10 +62,19 @@ beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), "whatsapp-router-server-test-"));
   config = { ...testConfig(), sessionsFile: join(dir, "sessions.json") };
 
-  sentMessages = [];
+  // A `const` local (not the outer `let sentMessages`) so the mock's closure
+  // is permanently bound to *this test's* array — a straggler from a prior
+  // test's still-pending handleWebhook call (it's fire-and-forget; the HTTP
+  // response ends well before async processing finishes, see server.ts) would
+  // otherwise write into whatever `sentMessages` the *next* test reassigned
+  // it to, since closures over a reassignable `let` capture the binding, not
+  // a value snapshot. Confirmed as a real, pre-existing flake via `vitest
+  // --sequence.shuffle`, unrelated to any specific test's own logic.
+  const messages: { chatId: string; text: string }[] = [];
+  sentMessages = messages;
   const waha: WahaClientLike = {
     sendText: vi.fn().mockImplementation((chatId: string, text: string) => {
-      sentMessages.push({ chatId, text });
+      messages.push({ chatId, text });
       return Promise.resolve();
     }),
     startTyping: vi.fn().mockResolvedValue(undefined),
