@@ -174,6 +174,30 @@ describe("FireflyClient", () => {
     logSpy.mockRestore();
   });
 
+  it("falls back to an empty string when reading the failed transaction body itself rejects", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const badResponse = new Response(null, { status: 500 });
+    vi.spyOn(badResponse, "text").mockRejectedValue(new Error("stream error"));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/accounts")) {
+          return Promise.resolve(
+            jsonResponse({ data: [{ id: "42", attributes: { name: "Checking" } }] }),
+          );
+        }
+        return Promise.resolve(badResponse);
+      }),
+    );
+    const client = new FireflyClient("http://firefly.test", "token", "Checking");
+    const reply = await client.logTransaction("20 groceries");
+
+    expect(reply).toBe("Firefly transaction failed (500).");
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["firefly failed", 500, ""]);
+    logSpy.mockRestore();
+  });
+
   it("retries the account lookup on the next call after a transient failure", async () => {
     const fetchMock = vi
       .fn()
