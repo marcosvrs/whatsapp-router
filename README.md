@@ -9,7 +9,7 @@ prefix:
 | `/new [message]` | Resets the sender's conversation with the agent, optionally starting a new one immediately |
 | `ha: <text>` | A configured [Home Assistant](https://www.home-assistant.io/) webhook — reacts ✅/❌ on the original message instead of replying with text |
 | `money: <amount> <description>` | A [Firefly III](https://www.firefly-iii.org/) withdrawal transaction — reacts ✅/❌ on the original message instead of replying with text |
-| anything else | An [opencode](https://opencode.ai/) agent session (one persistent session per sender) — WhatsApp's own typing indicator shows while it's working, then the real reply is sent once, no placeholder |
+| anything else | An [opencode](https://opencode.ai/) agent session (one persistent session per sender, identifies itself as "Sisyphus" — see below) — WhatsApp's own typing indicator shows while it's working, then the real reply is sent once, no placeholder |
 
 A failed `ha:`/`money:` reaction (❌) is followed by a text reply explaining
 what went wrong, so the sender knows why without cluttering the chat on the
@@ -32,10 +32,13 @@ the sender's WhatsApp display name and phone number, whether it's a 1:1 or
 group chat (and the group's name, if any), the message's timestamp, the text
 of whatever message it's replying to, and any shared location — everything
 WAHA exposes about the message that's actually worth telling the agent,
-without dumping raw payload noise into its context. Note: this context can't
-override an agent's own configured identity/persona (e.g. a name set by an
-opencode plugin) — the agent will still answer with whatever name it's
-actually configured with.
+without dumping raw payload noise into its context. One thing this context
+deliberately does *not* try to do: rename the agent. It identifies itself as
+"Sisyphus" (its identity comes from the opencode server's own
+[`oh-my-openagent`](https://github.com/code-yeongyu/oh-my-openagent) plugin
+config, hardcoded with an explicit instruction to reject any other name) —
+that's true everywhere it's reached, WhatsApp included, and isn't something
+this repo can or should override.
 
 The agent's reply comes back as standard Markdown, but WhatsApp renders its
 own smaller formatting syntax (single `*bold*`, `_italic_`, `~strike~`,
