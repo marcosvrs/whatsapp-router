@@ -312,7 +312,7 @@ describe("routeMessage — agent context", () => {
     const capture = captureSystem();
     const reply = await routeMessage(deps, "111", "hi", {
       context: {
-        senderName: "Marcos Vinícius Rubido",
+        senderName: "Alex Test",
         senderPhone: "111",
         isGroupChat: false,
       },
@@ -323,7 +323,7 @@ describe("routeMessage — agent context", () => {
     expect(capture.body()).toMatchObject({
       system:
         "You are being reached over WhatsApp.\n" +
-        "Message from: Marcos Vinícius Rubido (+111)\n" +
+        "Message from: Alex Test (+111)\n" +
         "Chat: a direct message (not a group)",
     });
   });
@@ -332,7 +332,7 @@ describe("routeMessage — agent context", () => {
     const capture = captureSystem();
     await routeMessage(deps, "111", "hi", {
       context: {
-        senderName: "Marcos",
+        senderName: "Alex",
         senderPhone: "111",
         isGroupChat: true,
         groupName: "Jarvis Test",
@@ -342,7 +342,7 @@ describe("routeMessage — agent context", () => {
     expect(capture.body()).toMatchObject({
       system:
         "You are being reached over WhatsApp.\n" +
-        "Message from: Marcos (+111)\n" +
+        "Message from: Alex (+111)\n" +
         'Chat: a group named "Jarvis Test"',
     });
   });
@@ -431,13 +431,13 @@ describe("routeMessage — agent context", () => {
       context: {
         senderPhone: "111",
         isGroupChat: true,
-        recentMessages: "Marcos: How much is it?\nSisyphus: It's 4.",
+        recentMessages: "Alex: How much is it?\nSisyphus: It's 4.",
       },
     });
 
     const system = (capture.body() as { system: string }).system;
     expect(system).toContain("Recent messages in this group");
-    expect(system).toContain("Marcos: How much is it?\nSisyphus: It's 4.");
+    expect(system).toContain("Alex: How much is it?\nSisyphus: It's 4.");
   });
 
   it("omits the recent-history line when not present", async () => {

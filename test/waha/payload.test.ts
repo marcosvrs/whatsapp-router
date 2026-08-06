@@ -129,8 +129,8 @@ describe("messageDedupeKey", () => {
 
 describe("extractPushName", () => {
   it("returns the sender's WhatsApp display name from _data.pushName", () => {
-    const msg: WahaMessage = { _data: { pushName: "Marcos Vinícius Rubido" } };
-    expect(extractPushName(msg)).toBe("Marcos Vinícius Rubido");
+    const msg: WahaMessage = { _data: { pushName: "Alex Test" } };
+    expect(extractPushName(msg)).toBe("Alex Test");
   });
 
   it("returns undefined when _data is missing", () => {
@@ -175,7 +175,7 @@ describe("hasDownloadableMedia", () => {
 });
 
 function historyMsg(overrides: Partial<WahaHistoryMessage> = {}): WahaHistoryMessage {
-  return { id: "h1", body: "hi", fromMe: false, _data: { pushName: "Marcos" }, ...overrides };
+  return { id: "h1", body: "hi", fromMe: false, _data: { pushName: "Alex" }, ...overrides };
 }
 
 describe("formatRecentMessages", () => {
@@ -184,7 +184,7 @@ describe("formatRecentMessages", () => {
       historyMsg({ id: "h2", body: "second" }),
       historyMsg({ id: "h1", body: "first" }),
     ];
-    expect(formatRecentMessages(messages, "")).toBe("Marcos: first\nMarcos: second");
+    expect(formatRecentMessages(messages, "")).toBe("Alex: first\nAlex: second");
   });
 
   it("labels the bot's own past messages as 'You'", () => {
@@ -202,7 +202,7 @@ describe("formatRecentMessages", () => {
       historyMsg({ id: "h1", body: "", hasMedia: true, media: { mimetype: "image/jpeg", url: "u" } }),
       historyMsg({ id: "h2", body: "", hasMedia: true, media: { mimetype: "application/pdf", url: "u" } }),
     ];
-    expect(formatRecentMessages(messages, "")).toBe("Marcos: [document]\nMarcos: [image]");
+    expect(formatRecentMessages(messages, "")).toBe("Alex: [document]\nAlex: [image]");
   });
 
   it("labels video and audio media by type, and falls back to [media] with no mimetype", () => {
@@ -211,7 +211,7 @@ describe("formatRecentMessages", () => {
       historyMsg({ id: "h2", body: "", hasMedia: true, media: { mimetype: "audio/ogg", url: "u" } }),
       historyMsg({ id: "h3", body: "", hasMedia: true, media: { url: "u" } }),
     ];
-    expect(formatRecentMessages(messages, "")).toBe("Marcos: [media]\nMarcos: [audio]\nMarcos: [video]");
+    expect(formatRecentMessages(messages, "")).toBe("Alex: [media]\nAlex: [audio]\nAlex: [video]");
   });
 
   it("excludes the message matching excludeMessageId", () => {

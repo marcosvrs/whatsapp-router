@@ -591,12 +591,12 @@ describe("server message handling", () => {
     const capture = captureAgentSystem();
     const body = messageBody({
       body: "hi",
-      _data: { pushName: "Marcos Vinícius Rubido" },
+      _data: { pushName: "Alex Test" },
     });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
     expect(capture.body()).toMatchObject({
-      system: expect.stringContaining("Message from: Marcos Vinícius Rubido (+111)") as string,
+      system: expect.stringContaining("Message from: Alex Test (+111)") as string,
     });
     const bodyObj = capture.body() as { system: string };
     expect(bodyObj.system.split("\n")).toContain("Chat: a direct message (not a group)");
@@ -654,7 +654,7 @@ describe("server message handling", () => {
   });
 
   function historyItem(overrides: Partial<WahaHistoryMessage> = {}): WahaHistoryMessage {
-    return { id: "h1", body: "hi", fromMe: false, _data: { pushName: "Marcos" }, ...overrides };
+    return { id: "h1", body: "hi", fromMe: false, _data: { pushName: "Alex" }, ...overrides };
   }
 
   function mentionHistoryItem(id: string, mentionedId: string): WahaHistoryMessage {
@@ -698,8 +698,8 @@ describe("server message handling", () => {
       );
       const system = (capture.body() as { system: string }).system;
       expect(system).toContain("Recent messages in this group");
-      expect(system).toContain("Marcos: third");
-      expect(system).toContain("Marcos: second");
+      expect(system).toContain("Alex: third");
+      expect(system).toContain("Alex: second");
       expect(system).not.toContain("too old");
       expect(system).not.toContain("the current triggering message");
     });
