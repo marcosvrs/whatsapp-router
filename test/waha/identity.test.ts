@@ -5,6 +5,10 @@ import type { WahaClientLike, WahaGroup, WahaSessionInfo } from "../../src/waha/
 function fakeWaha(overrides: Partial<WahaClientLike> = {}): WahaClientLike {
   return {
     sendText: vi.fn().mockResolvedValue(undefined),
+    startTyping: vi.fn().mockResolvedValue(undefined),
+    markChatRead: vi.fn().mockResolvedValue(undefined),
+    sendReaction: vi.fn().mockResolvedValue(undefined),
+    editMessage: vi.fn().mockResolvedValue(undefined),
     fetchGroups: vi.fn().mockResolvedValue({}),
     fetchSessionInfo: vi.fn().mockResolvedValue(null),
     ...overrides,

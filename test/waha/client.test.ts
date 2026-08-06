@@ -29,6 +29,22 @@ describe("WahaClient.sendText", () => {
     });
   });
 
+  it("includes the pre-generated id in the body when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.sendText("111@c.us", "hello", "MYID123");
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      session: "MySession",
+      chatId: "111@c.us",
+      text: "hello",
+      id: "MYID123",
+    });
+  });
+
   it("logs the status and response body when the send fails", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
@@ -60,6 +76,105 @@ describe("WahaClient.sendText", () => {
 
     const args = logSpy.mock.calls[0] as unknown[];
     expect(args.slice(1)).toEqual(["sendText failed", 500, ""]);
+  });
+});
+
+describe("WahaClient.startTyping", () => {
+  it("posts to /api/startTyping with the session and chatId", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.startTyping("111@c.us");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://waha.test/api/startTyping");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({ "Content-Type": "application/json", "X-Api-Key": "key123" });
+    expect(JSON.parse(init.body as string)).toEqual({ session: "MySession", chatId: "111@c.us" });
+  });
+
+  it("logs on failure", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.startTyping("111@c.us");
+    expect(logSpy.mock.calls[0]?.slice(1)).toEqual(["startTyping failed", 500, "oops"]);
+  });
+});
+
+describe("WahaClient.markChatRead", () => {
+  it("posts to the session-scoped read endpoint, URL-encoding the chat id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.markChatRead("111@c.us");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://waha.test/api/MySession/chats/111%40c.us/messages/read");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({});
+  });
+
+  it("logs on failure", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.markChatRead("111@c.us");
+    expect(logSpy.mock.calls[0]?.slice(1)).toEqual(["markChatRead failed", 500, "oops"]);
+  });
+});
+
+describe("WahaClient.sendReaction", () => {
+  it("PUTs to /api/reaction with the session, messageId, and reaction", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.sendReaction("msg_1", "✅");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://waha.test/api/reaction");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({
+      session: "MySession",
+      messageId: "msg_1",
+      reaction: "✅",
+    });
+  });
+
+  it("logs on failure", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.sendReaction("msg_1", "✅");
+    expect(logSpy.mock.calls[0]?.slice(1)).toEqual(["sendReaction failed", 500, "oops"]);
+  });
+});
+
+describe("WahaClient.editMessage", () => {
+  it("PUTs to the session-scoped message endpoint, URL-encoding chat and message ids", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.editMessage("111@c.us", "true_111@c.us_ABC", "updated text");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://waha.test/api/MySession/chats/111%40c.us/messages/true_111%40c.us_ABC",
+    );
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body as string)).toEqual({ text: "updated text" });
+  });
+
+  it("logs on failure", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.editMessage("111@c.us", "msg_1", "text");
+    expect(logSpy.mock.calls[0]?.slice(1)).toEqual(["editMessage failed", 500, "oops"]);
   });
 });
 

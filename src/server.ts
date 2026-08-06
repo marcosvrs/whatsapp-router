@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { Config } from "./config.js";
 import type { MessageDedupe } from "./dedupe.js";
@@ -9,6 +10,13 @@ import type { IdentityResolver } from "./waha/identity.js";
 import type { WahaClientLike } from "./waha/client.js";
 import { messageDedupeKey, stripMentions, type WahaMessage, type WahaWebhookPayload } from "./waha/payload.js";
 import { routeMessage, type RouterDeps } from "./router.js";
+
+// A WAHA message id we choose ourselves — sent as the placeholder's id so we
+// can edit that exact message once the (potentially slow) agent call resolves,
+// instead of depending on parsing an id back out of the send response.
+function generateMessageId(): string {
+  return randomBytes(10).toString("hex").toUpperCase();
+}
 
 export interface ServerDeps {
   waha: WahaClientLike;
@@ -58,6 +66,8 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
         text = stripMentions(text, msg);
       }
 
+      await deps.waha.markChatRead(from ?? "");
+
       if (deps.rateLimiter.isLimited(senderKey)) {
         log("rate limited", senderKey);
         await deps.waha.sendText(from ?? "", "Rate limit reached — try again in a few minutes.");
@@ -65,8 +75,19 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       }
 
       log("inbound", from, JSON.stringify(text).slice(0, 200));
+      await deps.waha.startTyping(from ?? "");
       const reply = await routeMessage(deps.router, senderKey, text);
-      await deps.waha.sendText(from ?? "", reply);
+      if (reply.kind === "reaction") {
+        await deps.waha.sendReaction(msg.id ?? "", reply.emoji);
+        if (reply.text) await deps.waha.sendText(from ?? "", reply.text);
+      } else if (reply.kind === "agent") {
+        const placeholderId = generateMessageId();
+        await deps.waha.sendText(from ?? "", "…", placeholderId);
+        const finalText = await reply.resolve();
+        await deps.waha.editMessage(from ?? "", placeholderId, finalText);
+      } else {
+        await deps.waha.sendText(from ?? "", reply.text);
+      }
     } catch (err) {
       log("webhook handling error", err instanceof Error ? err.message : String(err));
     }

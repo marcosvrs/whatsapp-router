@@ -33,7 +33,6 @@ const deps: ServerDeps = {
       authHeader: config.opencodeAuthHeader,
       modelProvider: config.opencodeModelProvider,
       modelId: config.opencodeModelId,
-      autoApprove: config.opencodeAutoApprove,
     }),
     sessions: new SessionStore(config.sessionsFile),
     senderLock: new SenderLock(),

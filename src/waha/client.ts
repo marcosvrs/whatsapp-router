@@ -17,7 +17,11 @@ export interface WahaSessionInfo {
 }
 
 export interface WahaClientLike {
-  sendText: (chatId: string, text: string) => Promise<void>;
+  sendText: (chatId: string, text: string, id?: string) => Promise<void>;
+  startTyping: (chatId: string) => Promise<void>;
+  markChatRead: (chatId: string) => Promise<void>;
+  sendReaction: (messageId: string, reaction: string) => Promise<void>;
+  editMessage: (chatId: string, messageId: string, text: string) => Promise<void>;
   fetchGroups: () => Promise<Record<string, WahaGroup>>;
   fetchSessionInfo: () => Promise<WahaSessionInfo | null>;
 }
@@ -29,15 +33,60 @@ export class WahaClient implements WahaClientLike {
     private readonly session: string,
   ) {}
 
-  async sendText(chatId: string, text: string): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/api/sendText`, {
-      method: "POST",
+  private call(method: string, path: string, body: unknown): Promise<Response> {
+    return fetch(`${this.baseUrl}${path}`, {
+      method,
       headers: { "Content-Type": "application/json", "X-Api-Key": this.apiKey },
-      body: JSON.stringify({ session: this.session, chatId, text }),
+      body: JSON.stringify(body),
     });
+  }
+
+  private async logIfFailed(action: string, res: Response): Promise<void> {
     if (!res.ok) {
-      log("sendText failed", res.status, await res.text().catch(() => ""));
+      log(`${action} failed`, res.status, await res.text().catch(() => ""));
     }
+  }
+
+  async sendText(chatId: string, text: string, id?: string): Promise<void> {
+    const res = await this.call("POST", "/api/sendText", {
+      session: this.session,
+      chatId,
+      text,
+      ...(id ? { id } : {}),
+    });
+    await this.logIfFailed("sendText", res);
+  }
+
+  async startTyping(chatId: string): Promise<void> {
+    const res = await this.call("POST", "/api/startTyping", { session: this.session, chatId });
+    await this.logIfFailed("startTyping", res);
+  }
+
+  async markChatRead(chatId: string): Promise<void> {
+    const res = await this.call(
+      "POST",
+      `/api/${this.session}/chats/${encodeURIComponent(chatId)}/messages/read`,
+      {},
+    );
+    await this.logIfFailed("markChatRead", res);
+  }
+
+  async sendReaction(messageId: string, reaction: string): Promise<void> {
+    const res = await this.call("PUT", "/api/reaction", {
+      session: this.session,
+      messageId,
+      reaction,
+    });
+    await this.logIfFailed("sendReaction", res);
+  }
+
+  async editMessage(chatId: string, messageId: string, text: string): Promise<void> {
+    const res = await this.call(
+      "PUT",
+      `/api/${this.session}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
+      { text },
+    );
+    await this.logIfFailed("editMessage", res);
   }
 
   async fetchGroups(): Promise<Record<string, WahaGroup>> {

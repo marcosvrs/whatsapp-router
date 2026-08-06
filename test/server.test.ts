@@ -16,6 +16,7 @@ import { SessionStore } from "../src/sessionStore.js";
 import { buildServer, type ServerDeps } from "../src/server.js";
 import type { IdentityResolver } from "../src/waha/identity.js";
 import type { WahaClientLike } from "../src/waha/client.js";
+import { requestUrl } from "./testUtils.js";
 
 const SECRET = "test-secret";
 
@@ -37,7 +38,6 @@ function testConfig(): Config {
     opencodeAuthHeader: "",
     opencodeModelProvider: "",
     opencodeModelId: "",
-    opencodeAutoApprove: true,
     sessionsFile: "",
     maxBodyBytes: 64 * 1024,
     rateLimitMax: 20,
@@ -67,6 +67,10 @@ beforeEach(async () => {
       sentMessages.push({ chatId, text });
       return Promise.resolve();
     }),
+    startTyping: vi.fn().mockResolvedValue(undefined),
+    markChatRead: vi.fn().mockResolvedValue(undefined),
+    sendReaction: vi.fn().mockResolvedValue(undefined),
+    editMessage: vi.fn().mockResolvedValue(undefined),
     fetchGroups: vi.fn().mockResolvedValue({}),
     fetchSessionInfo: vi.fn().mockResolvedValue(null),
   };
@@ -90,7 +94,7 @@ beforeEach(async () => {
         config.fireflyPat,
         config.fireflyDefaultSourceAccount,
       ),
-      opencode: new OpencodeClient({ baseUrl: config.opencodeBaseUrl, authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true }),
+      opencode: new OpencodeClient({ baseUrl: config.opencodeBaseUrl, authHeader: "Basic abc", modelProvider: "", modelId: "" }),
       sessions: new SessionStore(config.sessionsFile),
       senderLock: new SenderLock(),
     },
@@ -208,12 +212,13 @@ describe("server message handling", () => {
   it("routes an allowlisted 1:1 message and replies via waha", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) {
-          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
         return Promise.resolve(
-          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), { headers: { "Content-Type": "application/json" } }),
         );
       }),
     );
@@ -221,18 +226,24 @@ describe("server message handling", () => {
     const body = messageBody();
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "hi!" }]);
+    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "…" }]);
+    expect(deps.waha.editMessage).toHaveBeenCalledWith(
+      "111@c.us",
+      expect.any(String),
+      "hi!",
+    );
   });
 
   it("de-dupes a repeated delivery of the same message", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) {
-          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
         return Promise.resolve(
-          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), { headers: { "Content-Type": "application/json" } }),
         );
       }),
     );
@@ -255,12 +266,13 @@ describe("server message handling", () => {
     identity.isBotId = (id) => id === "botid";
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) {
-          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
         return Promise.resolve(
-          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), { headers: { "Content-Type": "application/json" } }),
         );
       }),
     );
@@ -275,19 +287,25 @@ describe("server message handling", () => {
     });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "hi!" }]);
+    expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "…" }]);
+    expect(deps.waha.editMessage).toHaveBeenCalledWith(
+      "group@g.us",
+      expect.any(String),
+      "hi!",
+    );
   });
 
   it("replies with a rate-limit message once the sender's limit is exceeded", async () => {
     deps.rateLimiter = new RateLimiter(1, 5 * 60 * 1000);
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) {
-          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
         return Promise.resolve(
-          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), { headers: { "Content-Type": "application/json" } }),
         );
       }),
     );
@@ -307,15 +325,152 @@ describe("server message handling", () => {
     expect(sentMessages).toHaveLength(0);
   });
 
+  it("marks the chat as read once the sender is allowed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "ses_1" }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), {
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    const body = messageBody();
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.markChatRead).toHaveBeenCalledWith("111@c.us");
+  });
+
+  it("does not mark the chat as read when the sender isn't allowed", async () => {
+    const body = messageBody({ from: "999@c.us" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(deps.waha.markChatRead).not.toHaveBeenCalled();
+  });
+
+  it("still marks the chat as read when the sender is rate limited", async () => {
+    deps.rateLimiter = new RateLimiter(0, 5 * 60 * 1000);
+    const body = messageBody();
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(deps.waha.markChatRead).toHaveBeenCalledWith("111@c.us");
+  });
+
+  it("sends a typing indicator before routing to the agent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "ses_1" }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), {
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    const body = messageBody();
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.startTyping).toHaveBeenCalledWith("111@c.us");
+  });
+
+  it("does not send a typing indicator when the sender is rate limited", async () => {
+    deps.rateLimiter = new RateLimiter(0, 5 * 60 * 1000);
+    const body = messageBody();
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(deps.waha.startTyping).not.toHaveBeenCalled();
+  });
+
+  it("sends a plain text reply for a bare /new command", async () => {
+    const body = messageBody({ body: "/new" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "Started a new conversation." }]);
+    expect(deps.waha.editMessage).not.toHaveBeenCalled();
+    expect(deps.waha.sendReaction).not.toHaveBeenCalled();
+  });
+
+  it("reacts with an emoji for a successful ha: command instead of sending text", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
+    deps.router.ha = new HaClient("http://ha.test", "token", "hook123");
+
+    const body = messageBody({ body: "ha: turn on lights" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.sendReaction).toHaveBeenCalledWith("m1", "✅");
+    expect(deps.waha.sendText).not.toHaveBeenCalled();
+  });
+
+  it("reacts with ❌ and also sends the failure text when ha: isn't configured", async () => {
+    const body = messageBody({ body: "ha: turn on lights" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.sendReaction).toHaveBeenCalledWith("m1", "❌");
+    expect(sentMessages).toEqual([
+      { chatId: "111@c.us", text: "Home Assistant webhook not configured yet." },
+    ]);
+  });
+
+  it("sends a placeholder message then edits it in place with the final agent reply", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "ses_1" }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "final reply" }] }), {
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    const body = messageBody({ body: "hi there" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(sentMessages).toHaveLength(1);
+    const sendCall = (deps.waha.sendText as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      string,
+      string,
+    ];
+    const [, , placeholderId] = sendCall;
+    expect(placeholderId).toBeTruthy();
+    expect(deps.waha.editMessage).toHaveBeenCalledWith("111@c.us", placeholderId, "final reply");
+  });
+
   it("does not strip @-mention markup from a 1:1 message", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) {
-          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
         return Promise.resolve(
-          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), { headers: { "Content-Type": "application/json" } }),
         );
       }),
     );
@@ -376,12 +531,13 @@ describe("server message handling", () => {
   it("logs the inbound message with the sender and a truncated preview", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) {
-          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
         return Promise.resolve(
-          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+          new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "hi!" }] }), { headers: { "Content-Type": "application/json" } }),
         );
       }),
     );

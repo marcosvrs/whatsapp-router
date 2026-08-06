@@ -33,7 +33,6 @@ describe("loadConfig", () => {
       opencodeAuthHeader: "",
       opencodeModelProvider: "",
       opencodeModelId: "",
-      opencodeAutoApprove: true,
       sessionsFile: "/app/state/sessions.json",
       maxBodyBytes: 65536,
       rateLimitMax: 20,
@@ -99,14 +98,6 @@ describe("loadConfig", () => {
     expect(config.opencodeAuthHeader).toBe(
       `Basic ${Buffer.from("opencode:pass").toString("base64")}`,
     );
-  });
-
-  it("treats OPENCODE_AUTO_APPROVE=false as disabled, anything else as enabled", () => {
-    expect(loadConfig(baseEnv({ OPENCODE_AUTO_APPROVE: "false" })).opencodeAutoApprove).toBe(
-      false,
-    );
-    expect(loadConfig(baseEnv({ OPENCODE_AUTO_APPROVE: "true" })).opencodeAutoApprove).toBe(true);
-    expect(loadConfig(baseEnv()).opencodeAutoApprove).toBe(true);
   });
 
   it("parses numeric overrides for rate limiting", () => {

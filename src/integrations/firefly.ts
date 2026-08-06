@@ -1,5 +1,6 @@
 import { normalizeAmount } from "../amount.js";
 import { log } from "../log.js";
+import type { ActionResult } from "../actionResult.js";
 
 interface FireflyAccount {
   id: string;
@@ -49,22 +50,28 @@ export class FireflyClient {
     }
   }
 
-  async logTransaction(text: string): Promise<string> {
-    if (!this.isConfigured()) return "Firefly III not configured yet.";
+  async logTransaction(text: string): Promise<ActionResult> {
+    if (!this.isConfigured()) return { ok: false, text: "Firefly III not configured yet." };
 
     const match = /^\s*([\d.,]+)\s+(.+)$/.exec(text);
     if (!match) {
-      return 'Format: "money: <amount> <description>", e.g. "money: 20 groceries"';
+      return {
+        ok: false,
+        text: 'Format: "money: <amount> <description>", e.g. "money: 20 groceries"',
+      };
     }
     const rawAmount = match[1] ?? "";
     const amount = normalizeAmount(rawAmount);
     if (!amount) {
-      return `Couldn't parse amount "${rawAmount}" — use plain numbers, e.g. "money: 20.50 groceries".`;
+      return {
+        ok: false,
+        text: `Couldn't parse amount "${rawAmount}" — use plain numbers, e.g. "money: 20.50 groceries".`,
+      };
     }
     const description = (match[2] ?? "").trim();
 
     const lookup = await this.resolveSourceAccountId();
-    if ("error" in lookup) return lookup.error;
+    if ("error" in lookup) return { ok: false, text: lookup.error };
 
     const res = await fetch(`${this.baseUrl}/api/v1/transactions`, {
       method: "POST",
@@ -88,8 +95,8 @@ export class FireflyClient {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       log("firefly failed", res.status, body);
-      return `Firefly transaction failed (${String(res.status)}).`;
+      return { ok: false, text: `Firefly transaction failed (${String(res.status)}).` };
     }
-    return `Logged: ${amount} — ${description}`;
+    return { ok: true, text: `Logged: ${amount} — ${description}` };
   }
 }

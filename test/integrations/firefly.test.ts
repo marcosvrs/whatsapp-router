@@ -13,7 +13,10 @@ describe("FireflyClient", () => {
   it("reports not configured when the token is missing", async () => {
     const client = new FireflyClient("http://firefly.test", "", "Checking");
     expect(client.isConfigured()).toBe(false);
-    expect(await client.logTransaction("20 groceries")).toBe("Firefly III not configured yet.");
+    expect(await client.logTransaction("20 groceries")).toEqual({
+      ok: false,
+      text: "Firefly III not configured yet.",
+    });
   });
 
   it("reports not configured when the default source account is missing", () => {
@@ -29,21 +32,23 @@ describe("FireflyClient", () => {
   it("returns a format hint when the text doesn't match amount+description", async () => {
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("groceries");
-    expect(reply).toContain("Format:");
+    expect(reply.ok).toBe(false);
+    expect(reply.text).toContain("Format:");
   });
 
   it("returns a parse error for an amount that matches the shape but not the number format", async () => {
     // "1.2.3" matches [\d.,]+ but normalizeAmount rejects it (multiple decimal points).
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("1.2.3 groceries");
-    expect(reply).toContain('Couldn\'t parse amount "1.2.3"');
+    expect(reply.ok).toBe(false);
+    expect(reply.text).toContain('Couldn\'t parse amount "1.2.3"');
   });
 
   it("returns a not-found message when the configured account doesn't exist", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ data: [] })));
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("20 groceries");
-    expect(reply).toBe('Firefly asset account "Checking" not found.');
+    expect(reply).toEqual({ ok: false, text: 'Firefly asset account "Checking" not found.' });
   });
 
   it("returns a not-found message when the account list omits the matching name", async () => {
@@ -53,7 +58,7 @@ describe("FireflyClient", () => {
     );
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("20 groceries");
-    expect(reply).toBe('Firefly asset account "Checking" not found.');
+    expect(reply).toEqual({ ok: false, text: 'Firefly asset account "Checking" not found.' });
   });
 
   it("requests the accounts lookup with the exact url, method, and headers", async () => {
@@ -74,7 +79,7 @@ describe("FireflyClient", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("20 groceries");
-    expect(reply).toBe("Firefly accounts lookup failed: network down");
+    expect(reply).toEqual({ ok: false, text: "Firefly accounts lookup failed: network down" });
   });
 
   it("looks up the account once, then reuses it across calls", async () => {
@@ -112,7 +117,7 @@ describe("FireflyClient", () => {
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("1,234.56 rent");
 
-    expect(reply).toBe("Logged: 1234.56 — rent");
+    expect(reply).toEqual({ ok: true, text: "Logged: 1234.56 — rent" });
     const transactionCall = fetchMock.mock.calls.find(
       (call: unknown[]) => typeof call[0] === "string" && call[0].includes("/transactions"),
     ) as [string, RequestInit];
@@ -150,7 +155,7 @@ describe("FireflyClient", () => {
 
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("20 groceries");
-    expect(reply).toBe("Firefly transaction failed (500).");
+    expect(reply).toEqual({ ok: false, text: "Firefly transaction failed (500)." });
   });
 
   it("logs the exact status and response body when the transaction post fails", async () => {
@@ -192,7 +197,7 @@ describe("FireflyClient", () => {
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("20 groceries");
 
-    expect(reply).toBe("Firefly transaction failed (500).");
+    expect(reply).toEqual({ ok: false, text: "Firefly transaction failed (500)." });
     const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
     expect(logged).toContainEqual(["firefly failed", 500, ""]);
     logSpy.mockRestore();
@@ -208,9 +213,9 @@ describe("FireflyClient", () => {
 
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const first = await client.logTransaction("20 groceries");
-    expect(first).toBe("Firefly accounts lookup failed (500)");
+    expect(first).toEqual({ ok: false, text: "Firefly accounts lookup failed (500)" });
 
     const second = await client.logTransaction("20 groceries");
-    expect(second).toBe("Logged: 20 — groceries");
+    expect(second).toEqual({ ok: true, text: "Logged: 20 — groceries" });
   });
 });

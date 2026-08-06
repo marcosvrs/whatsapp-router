@@ -9,7 +9,10 @@ describe("HaClient", () => {
   it("reports not configured when the webhook id is missing", async () => {
     const client = new HaClient("http://ha.test", "token", "");
     expect(client.isConfigured()).toBe(false);
-    expect(await client.trigger("hi")).toBe("Home Assistant webhook not configured yet.");
+    expect(await client.trigger("hi")).toEqual({
+      ok: false,
+      text: "Home Assistant webhook not configured yet.",
+    });
   });
 
   it("reports not configured when the token is missing", () => {
@@ -24,7 +27,7 @@ describe("HaClient", () => {
     const client = new HaClient("http://ha.test", "token123", "hook123");
     const reply = await client.trigger("turn on lights");
 
-    expect(reply).toBe("Sent to Home Assistant.");
+    expect(reply).toEqual({ ok: true, text: "Sent to Home Assistant." });
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://ha.test/api/webhook/hook123");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer token123");
@@ -34,6 +37,6 @@ describe("HaClient", () => {
   it("returns a failure message with the status code on a non-ok response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 500 })));
     const client = new HaClient("http://ha.test", "token", "hook123");
-    expect(await client.trigger("hi")).toBe("HA webhook failed (500).");
+    expect(await client.trigger("hi")).toEqual({ ok: false, text: "HA webhook failed (500)." });
   });
 });

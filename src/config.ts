@@ -20,7 +20,6 @@ export interface Config {
   opencodeAuthHeader: string;
   opencodeModelProvider: string;
   opencodeModelId: string;
-  opencodeAutoApprove: boolean;
 
   sessionsFile: string;
 
@@ -69,7 +68,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     opencodeAuthHeader,
     opencodeModelProvider: env.OPENCODE_MODEL_PROVIDER ?? "",
     opencodeModelId: env.OPENCODE_MODEL_ID ?? "",
-    opencodeAutoApprove: env.OPENCODE_AUTO_APPROVE !== "false",
 
     sessionsFile: env.SESSIONS_FILE ?? "/app/state/sessions.json",
 

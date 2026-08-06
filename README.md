@@ -7,9 +7,14 @@ prefix:
 | Message | Routed to |
 |---|---|
 | `/new [message]` | Resets the sender's conversation with the agent, optionally starting a new one immediately |
-| `ha: <text>` | A configured [Home Assistant](https://www.home-assistant.io/) webhook |
-| `money: <amount> <description>` | A [Firefly III](https://www.firefly-iii.org/) withdrawal transaction |
-| anything else | An [opencode](https://opencode.ai/) agent session (one persistent session per sender) |
+| `ha: <text>` | A configured [Home Assistant](https://www.home-assistant.io/) webhook — reacts ✅/❌ on the original message instead of replying with text |
+| `money: <amount> <description>` | A [Firefly III](https://www.firefly-iii.org/) withdrawal transaction — reacts ✅/❌ on the original message instead of replying with text |
+| anything else | An [opencode](https://opencode.ai/) agent session (one persistent session per sender) — a placeholder reply is sent immediately and edited in place once the agent responds |
+
+A failed `ha:`/`money:` reaction (❌) is followed by a text reply explaining
+what went wrong, so the sender knows why without cluttering the chat on the
+success path. Every inbound message also gets a WhatsApp read receipt, and a
+typing indicator shows while the agent is working.
 
 Works in a 1:1 chat with the bot, or in any group it's added to — as long as
 the sender is allowlisted and @-mentions the bot.
@@ -19,8 +24,12 @@ the sender is allowlisted and @-mentions the bot.
 WAHA is purely a WhatsApp transport layer (send/receive, sessions, media) —
 it has no concept of routing a message to an arbitrary set of internal APIs,
 maintaining a conversation per sender, or an allowlist. This service is that
-glue, kept intentionally small: a single Node HTTP server, one dependency-free
-runtime (no framework), plain constructor-injected classes per integration.
+glue, kept intentionally small: a single Node HTTP server, no web framework,
+plain constructor-injected classes per integration. The only production
+dependency is [`@opencode-ai/sdk`](https://www.npmjs.com/package/@opencode-ai/sdk),
+the official client for the opencode agent — every other integration
+(WAHA, Home Assistant, Firefly III) talks to its REST API directly via
+native `fetch`.
 
 ## Requirements
 
@@ -110,16 +119,20 @@ src/
   config.ts              env var loading
   security.ts             webhook HMAC verification
   amount.ts                "20,50" / "1,234.56" / "1.234,56" amount parsing
+  actionResult.ts           { ok, text } shape shared by ha:/money: integrations
   rateLimit.ts, dedupe.ts, senderLock.ts, sessionStore.ts
   waha/
-    client.ts              thin WAHA REST API wrapper
+    client.ts              WAHA REST API wrapper — send/react/edit/typing/read-receipts
     payload.ts              parsing WAHA's raw webhook payload (mentions, dedupe key)
     identity.ts              @lid <-> phone resolution, bot's own id (for mention detection)
   integrations/
-    firefly.ts, homeAssistant.ts, opencode.ts
+    firefly.ts, homeAssistant.ts   plain fetch, return ActionResult
+    opencode.ts                     wraps @opencode-ai/sdk
   allowlist.ts             who's allowed to trigger the bot, and from where
-  router.ts                 prefix -> integration dispatch
-  server.ts                 HTTP wiring: auth, size limits, dedupe, rate limit
+  router.ts                 prefix -> integration dispatch; returns a RouteReply
+                            (text / reaction / lazily-resolved agent reply)
+  server.ts                 HTTP wiring: auth, size limits, dedupe, rate limit,
+                            typing indicator, read receipts, placeholder+edit
   index.ts                  composition root
 ```
 

@@ -8,9 +8,13 @@ import { OpencodeClient } from "../src/integrations/opencode.js";
 import { routeMessage, type RouterDeps } from "../src/router.js";
 import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
+import { requestUrl } from "./testUtils.js";
 
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status });
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 let dir: string;
@@ -21,7 +25,7 @@ beforeEach(() => {
   deps = {
     ha: new HaClient("http://ha.test", "token", "hook123"),
     firefly: new FireflyClient("http://firefly.test", "token", "Checking"),
-    opencode: new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true }),
+    opencode: new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "Basic abc", modelProvider: "", modelId: "" }),
     sessions: new SessionStore(join(dir, "sessions.json")),
     senderLock: new SenderLock(),
   };
@@ -36,7 +40,7 @@ describe("routeMessage — /new", () => {
   it("resets the session and returns a confirmation when sent alone", async () => {
     deps.sessions.set("111", "ses_old");
     const reply = await routeMessage(deps, "111", "/new");
-    expect(reply).toBe("Started a new conversation.");
+    expect(reply).toEqual({ kind: "text", text: "Started a new conversation." });
     expect(deps.sessions.get("111")).toBeUndefined();
   });
 
@@ -44,13 +48,14 @@ describe("routeMessage — /new", () => {
     deps.sessions.set("111", "ses_old");
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
-        return Promise.resolve(jsonResponse({ parts: [{ type: "text", text: "hi again" }] }));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "hi again" }] }));
       }),
     );
 
-    const reply = await routeMessage(deps, "111", "/new hello");
+    const reply = await agentText(deps, "111", "/new hello");
     expect(reply).toBe("hi again");
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
@@ -60,7 +65,13 @@ describe("routeMessage — ha: prefix", () => {
   it("delegates to the HA client with the prefix stripped", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
     const reply = await routeMessage(deps, "111", "ha: turn on lights");
-    expect(reply).toBe("Sent to Home Assistant.");
+    expect(reply).toEqual({ kind: "reaction", emoji: "✅" });
+  });
+
+  it("reacts with ❌ and includes the failure text when the webhook call fails", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 500 })));
+    const reply = await routeMessage(deps, "111", "ha: turn on lights");
+    expect(reply).toEqual({ kind: "reaction", emoji: "❌", text: "HA webhook failed (500)." });
   });
 });
 
@@ -68,7 +79,8 @@ describe("routeMessage — money: prefix", () => {
   it("delegates to the Firefly client with the prefix stripped", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.includes("/accounts")) {
           return Promise.resolve(
             jsonResponse({ data: [{ id: "42", attributes: { name: "Checking" } }] }),
@@ -78,21 +90,40 @@ describe("routeMessage — money: prefix", () => {
       }),
     );
     const reply = await routeMessage(deps, "111", "money: 20 groceries");
-    expect(reply).toBe("Logged: 20 — groceries");
+    expect(reply).toEqual({ kind: "reaction", emoji: "✅" });
+  });
+
+  it("reacts with ❌ and includes the failure text when the format is invalid", async () => {
+    const reply = await routeMessage(deps, "111", "money: groceries");
+    expect(reply).toEqual({
+      kind: "reaction",
+      emoji: "❌",
+      text: 'Format: "money: <amount> <description>", e.g. "money: 20 groceries"',
+    });
   });
 });
+
+// Agent-routed replies are lazy (`{kind: "agent", resolve}`) so the caller
+// can send a placeholder before the actual opencode call runs — tests need
+// to invoke resolve() themselves to trigger it and get the final text.
+async function agentText(deps: RouterDeps, senderKey: string, text: string): Promise<string> {
+  const reply = await routeMessage(deps, senderKey, text);
+  if (reply.kind !== "agent") throw new Error(`expected an agent reply, got ${reply.kind}`);
+  return reply.resolve();
+}
 
 describe("routeMessage — default (agent)", () => {
   it("creates a session on first contact and sends the message", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
-        return Promise.resolve(jsonResponse({ parts: [{ type: "text", text: "hello!" }] }));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "hello!" }] }));
       }),
     );
 
-    const reply = await routeMessage(deps, "111", "hi there");
+    const reply = await agentText(deps, "111", "hi there");
     expect(reply).toBe("hello!");
     expect(deps.sessions.get("111")).toBe("ses_1");
   });
@@ -101,10 +132,10 @@ describe("routeMessage — default (agent)", () => {
     deps.sessions.set("111", "ses_existing");
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(jsonResponse({ parts: [{ type: "text", text: "ok" }] }));
+      .mockResolvedValue(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await routeMessage(deps, "111", "hi again");
+    await agentText(deps, "111", "hi again");
 
     const sessionCalls = fetchMock.mock.calls.filter(
       (call: unknown[]) => typeof call[0] === "string" && call[0].endsWith("/session"),
@@ -113,8 +144,8 @@ describe("routeMessage — default (agent)", () => {
   });
 
   it("returns a friendly message when opencode isn't configured", async () => {
-    deps.opencode = new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "", modelProvider: "", modelId: "", autoApprove: true });
-    const reply = await routeMessage(deps, "111", "hi");
+    deps.opencode = new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "", modelProvider: "", modelId: "" });
+    const reply = await agentText(deps, "111", "hi");
     expect(reply).toBe("opencode agent not configured yet.");
   });
 
@@ -123,10 +154,10 @@ describe("routeMessage — default (agent)", () => {
     const setSpy = vi.spyOn(deps.sessions, "set");
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(jsonResponse({ parts: [{ type: "text", text: "ok" }] })),
+      vi.fn().mockResolvedValue(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] })),
     );
 
-    await routeMessage(deps, "111", "hi again");
+    await agentText(deps, "111", "hi again");
 
     expect(setSpy).not.toHaveBeenCalled();
     expect(deps.sessions.get("111")).toBe("ses_existing");
@@ -136,13 +167,15 @@ describe("routeMessage — default (agent)", () => {
     deps.sessions.set("111", "ses_stale");
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
-        return Promise.resolve(jsonResponse({ status: 404 }, 404));
+        if (url.includes("/session/ses_stale/")) return Promise.resolve(jsonResponse({}, 404));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] }));
       }),
     );
 
-    const reply = await routeMessage(deps, "111", "hi");
+    const reply = await agentText(deps, "111", "hi");
 
     expect(deps.sessions.get("111")).toBe("ses_new");
     expect(reply).not.toBe("Agent call failed — check whatsapp-router logs.");
@@ -150,26 +183,27 @@ describe("routeMessage — default (agent)", () => {
 
   it("returns a failure message and logs when the opencode call throws", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
-    const reply = await routeMessage(deps, "111", "hi");
+    const reply = await agentText(deps, "111", "hi");
     expect(reply).toBe("Agent call failed — check whatsapp-router logs.");
   });
 
   it("is case-insensitive and trims surrounding whitespace for every prefix", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
     const reply = await routeMessage(deps, "111", "  HA:  turn on lights  ");
-    expect(reply).toBe("Sent to Home Assistant.");
+    expect(reply).toEqual({ kind: "reaction", emoji: "✅" });
   });
 
   it("treats a bare '/new' prefix (e.g. '/newfoo') as agent text, not the reset command", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((url: string) => {
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
-        return Promise.resolve(jsonResponse({ parts: [{ type: "text", text: "handled" }] }));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "handled" }] }));
       }),
     );
     deps.sessions.set("111", "ses_untouched");
-    const reply = await routeMessage(deps, "111", "/newfoo bar");
+    const reply = await agentText(deps, "111", "/newfoo bar");
     expect(reply).toBe("handled");
     // "/new" only matches at a word boundary — session must NOT have been reset.
     expect(deps.sessions.get("111")).not.toBeUndefined();
