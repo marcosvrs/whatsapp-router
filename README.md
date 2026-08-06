@@ -177,13 +177,11 @@ a running WAHA/opencode/Firefly/Home Assistant instance in the loop.
 ## Known limitations
 
 - Mention detection recognizes plain-text messages
-  (`extendedTextMessage.contextInfo.mentionedJid`, confirmed against a live WAHA
-  payload) and, on the assumption it mirrors that same shape, image/document/video
-  captions (`imageMessage`/`documentMessage`/`videoMessage.contextInfo.mentionedJid`
-  — **not** independently confirmed against a live payload; if @-mentioning the
-  bot in a group photo/document caption doesn't work, this is the first thing to
-  check). A mention inside a reply uses a different message shape and isn't
-  handled at all — left alone rather than guessed at.
+  (`extendedTextMessage.contextInfo.mentionedJid`) and image/document/video
+  captions (`imageMessage`/`documentMessage`/`videoMessage.contextInfo.mentionedJid`)
+  — both confirmed against live WAHA payloads (pulled from real group message
+  history via WAHA's REST API). A mention inside a reply uses a different
+  message shape and isn't handled at all — left alone rather than guessed at.
 - Location messages (`WahaLocation`, `latitude`/`longitude`/`title`) mirror
   WAHA's documented *send*-location request shape — the receive side isn't
   independently confirmed against a live payload either.
