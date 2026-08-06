@@ -12,6 +12,7 @@ function fakeWaha(overrides: Partial<WahaClientLike> = {}): WahaClientLike {
     fetchGroups: vi.fn().mockResolvedValue({}),
     fetchSessionInfo: vi.fn().mockResolvedValue(null),
     downloadMedia: vi.fn().mockResolvedValue(null),
+    fetchRecentMessages: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }

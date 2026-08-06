@@ -316,3 +316,32 @@ describe("WahaClient.fetchSessionInfo", () => {
     expect(await client.fetchSessionInfo()).toBeNull();
   });
 });
+
+describe("WahaClient.fetchRecentMessages", () => {
+  it("requests the chat-history endpoint with limit, downloadMedia=false, and the api key header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify([])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.fetchRecentMessages("123@g.us", 25);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "http://waha.test/api/MySession/chats/123%40g.us/messages?limit=25&downloadMedia=false",
+    );
+    expect(init.headers).toEqual({ "X-Api-Key": "key123" });
+  });
+
+  it("returns the parsed messages on success", async () => {
+    const messages = [{ id: "m1", body: "hi" }];
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(messages))));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    expect(await client.fetchRecentMessages("123@g.us", 25)).toEqual(messages);
+  });
+
+  it("returns an empty array on a non-ok response", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 500 })));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    expect(await client.fetchRecentMessages("123@g.us", 25)).toEqual([]);
+  });
+});

@@ -116,7 +116,7 @@ describe("OpencodeClient.send", () => {
   it("attaches a file part alongside the text part when media is provided", async () => {
     sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
     await client().send("ses_1", "check this out", {
-      media: { mimetype: "image/jpeg", dataBase64: "Zm9v", filename: "photo.jpg" },
+      media: [{ mimetype: "image/jpeg", dataBase64: "Zm9v", filename: "photo.jpg" }],
     });
 
     expect(sessionPrompt).toHaveBeenCalledWith({
@@ -133,7 +133,7 @@ describe("OpencodeClient.send", () => {
   it("sends only the file part when there is media but no caption text", async () => {
     sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
     await client().send("ses_1", "", {
-      media: { mimetype: "application/pdf", dataBase64: "YmFy" },
+      media: [{ mimetype: "application/pdf", dataBase64: "YmFy" }],
     });
 
     expect(sessionPrompt).toHaveBeenCalledWith({
@@ -141,6 +141,37 @@ describe("OpencodeClient.send", () => {
       body: {
         parts: [{ type: "file", mime: "application/pdf", filename: undefined, url: "data:application/pdf;base64,YmFy" }],
       },
+    });
+  });
+
+  it("attaches a file part per item when multiple media are provided", async () => {
+    sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
+    await client().send("ses_1", "context from earlier", {
+      media: [
+        { mimetype: "image/jpeg", dataBase64: "aaa", filename: "one.jpg" },
+        { mimetype: "application/pdf", dataBase64: "bbb", filename: "two.pdf" },
+      ],
+    });
+
+    expect(sessionPrompt).toHaveBeenCalledWith({
+      path: { id: "ses_1" },
+      body: {
+        parts: [
+          { type: "text", text: "context from earlier" },
+          { type: "file", mime: "image/jpeg", filename: "one.jpg", url: "data:image/jpeg;base64,aaa" },
+          { type: "file", mime: "application/pdf", filename: "two.pdf", url: "data:application/pdf;base64,bbb" },
+        ],
+      },
+    });
+  });
+
+  it("sends no file part when media is an empty array", async () => {
+    sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
+    await client().send("ses_1", "hi", { media: [] });
+
+    expect(sessionPrompt).toHaveBeenCalledWith({
+      path: { id: "ses_1" },
+      body: { parts: [{ type: "text", text: "hi" }] },
     });
   });
 
@@ -168,7 +199,7 @@ describe("OpencodeClient.send", () => {
   it("includes both media and system together", async () => {
     sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
     await client().send("ses_1", "check this out", {
-      media: { mimetype: "image/jpeg", dataBase64: "Zm9v" },
+      media: [{ mimetype: "image/jpeg", dataBase64: "Zm9v" }],
       system: "You are Jarvis.",
     });
 

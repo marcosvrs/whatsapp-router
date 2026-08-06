@@ -109,7 +109,7 @@ async function agentText(
   text: string,
   media?: OpencodeMediaAttachment,
 ): Promise<string> {
-  const reply = await routeMessage(deps, senderKey, text, media ? { media } : {});
+  const reply = await routeMessage(deps, senderKey, text, media ? { media: [media] } : {});
   if (reply.kind !== "text") throw new Error(`expected a text reply, got ${reply.kind}`);
   return reply.text;
 }
@@ -268,6 +268,12 @@ describe("routeMessage — default (agent)", () => {
 });
 
 describe("routeMessage — /new with media", () => {
+  it("treats an empty media array the same as no media at all (bare '/new' resets, no agent call)", async () => {
+    deps.sessions.set("111", "ses_old");
+    const reply = await routeMessage(deps, "111", "/new", { media: [] });
+    expect(reply).toEqual({ kind: "text", text: "Started a new conversation." });
+  });
+
   it("forwards to the agent (instead of the plain reset confirmation) when media is attached without trailing text", async () => {
     const media: OpencodeMediaAttachment = { mimetype: "image/jpeg", dataBase64: "Zm9v" };
     vi.stubGlobal(
@@ -417,6 +423,31 @@ describe("routeMessage — agent context", () => {
         "Shared location: Our office (38.8937255, -77.0969763)",
       ) as string,
     });
+  });
+
+  it("includes recent group history when present", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: {
+        senderPhone: "111",
+        isGroupChat: true,
+        recentMessages: "Marcos: How much is it?\nSisyphus: It's 4.",
+      },
+    });
+
+    const system = (capture.body() as { system: string }).system;
+    expect(system).toContain("Recent messages in this group");
+    expect(system).toContain("Marcos: How much is it?\nSisyphus: It's 4.");
+  });
+
+  it("omits the recent-history line when not present", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: { senderPhone: "111", isGroupChat: false },
+    });
+
+    const system = (capture.body() as { system: string }).system;
+    expect(system).not.toContain("Recent messages");
   });
 
   it("routes a bare /new with only a shared location to the agent instead of resetting", async () => {

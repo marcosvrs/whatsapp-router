@@ -1,4 +1,5 @@
 import { log } from "../log.js";
+import type { WahaHistoryMessage } from "./payload.js";
 
 export interface WahaGroupParticipant {
   id?: string;
@@ -26,6 +27,7 @@ export interface WahaClientLike {
   fetchGroups: () => Promise<Record<string, WahaGroup>>;
   fetchSessionInfo: () => Promise<WahaSessionInfo | null>;
   downloadMedia: (url: string) => Promise<string | null>;
+  fetchRecentMessages: (chatId: string, limit: number) => Promise<WahaHistoryMessage[]>;
 }
 
 export class WahaClient implements WahaClientLike {
@@ -132,5 +134,15 @@ export class WahaClient implements WahaClientLike {
       log("downloadMedia failed", err instanceof Error ? err.message : String(err));
       return null;
     }
+  }
+
+  async fetchRecentMessages(chatId: string, limit: number): Promise<WahaHistoryMessage[]> {
+    const res = await fetch(
+      `${this.baseUrl}/api/${this.session}/chats/${encodeURIComponent(chatId)}/messages` +
+        `?limit=${String(limit)}&downloadMedia=false`,
+      { headers: { "X-Api-Key": this.apiKey } },
+    );
+    if (!res.ok) return [];
+    return (await res.json()) as WahaHistoryMessage[];
   }
 }

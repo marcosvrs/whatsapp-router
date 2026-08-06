@@ -22,7 +22,9 @@ export interface OpencodeMediaAttachment {
 }
 
 export interface OpencodeSendOptions {
-  media?: OpencodeMediaAttachment;
+  // The triggering message's own attachment, plus (for group messages) any
+  // recent-history media forwarded alongside it — each becomes its own file part.
+  media?: OpencodeMediaAttachment[];
   // Plain-language context (who's messaging, over what channel, etc.) kept
   // separate from the user's own message text — passed straight through to
   // the SDK's per-request `system` field.
@@ -75,12 +77,12 @@ export class OpencodeClient {
     const { media, system } = options;
     const parts: (TextPartInput | FilePartInput)[] = [];
     if (text) parts.push({ type: "text", text });
-    if (media) {
+    for (const item of media ?? []) {
       parts.push({
         type: "file",
-        mime: media.mimetype,
-        filename: media.filename,
-        url: `data:${media.mimetype};base64,${media.dataBase64}`,
+        mime: item.mimetype,
+        filename: item.filename,
+        url: `data:${item.mimetype};base64,${item.dataBase64}`,
       });
     }
     return this.client.session.prompt({

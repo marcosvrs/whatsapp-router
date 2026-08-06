@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Routes WhatsApp messages — received via a self-hosted WAHA (WhatsApp HTTP API) instance — to one of three integrations based on a text prefix: `/new` (resets the sender's opencode agent session), `ha:` (a Home Assistant webhook), `money:` (a Firefly III transaction), or anything else (the opencode agent, one persistent session per sender). Works in 1:1 chats or in any group the bot is added to, as long as the sender is allowlisted and @-mentions the bot. `ha:`/`money:` react ✅/❌ on the original message instead of replying with text (❌ is followed by a text explanation); the agent path shows WhatsApp's native typing indicator while it works, then sends the real reply once — no placeholder message (a placeholder-then-edit approach was tried and deliberately reverted; see the request-flow note below). Every inbound message gets a read receipt. Images/documents are downloaded and forwarded to the agent as a file part; a shared location is described in words; `ha:`/`money:` ignore attachments/locations — they aren't media-aware. The agent also gets a `system`-field context per message (who's messaging, over WhatsApp, 1:1 or which group, when, replying to what) — see the request-flow note below. The agent's Markdown reply is converted to WhatsApp's own formatting syntax before being sent — see the `markdownToWhatsapp` note below.
+Routes WhatsApp messages — received via a self-hosted WAHA (WhatsApp HTTP API) instance — to one of three integrations based on a text prefix: `/new` (resets the sender's opencode agent session), `ha:` (a Home Assistant webhook), `money:` (a Firefly III transaction), or anything else (the opencode agent, one persistent session per sender). Works in 1:1 chats or in any group the bot is added to, as long as the sender is allowlisted and @-mentions the bot. `ha:`/`money:` react ✅/❌ on the original message instead of replying with text (❌ is followed by a text explanation); the agent path shows WhatsApp's native typing indicator while it works, then sends the real reply once — no placeholder message (a placeholder-then-edit approach was tried and deliberately reverted; see the request-flow note below). Every inbound message gets a read receipt. Images/documents are downloaded and forwarded to the agent as a file part; a shared location is described in words; `ha:`/`money:` ignore attachments/locations — they aren't media-aware. The agent also gets a `system`-field context per message (who's messaging, over WhatsApp, 1:1 or which group, when, replying to what, and — for group messages — recent chatter since the bot's last mention) — see the request-flow note below. The agent's Markdown reply is converted to WhatsApp's own formatting syntax before being sent — see the `markdownToWhatsapp` note below.
 
 WAHA itself is purely a transport layer with no routing, per-sender state, or allowlist concept — this service is that glue, kept intentionally small: a single Node HTTP server, no framework, plain constructor-injected classes per integration. The only production dependency is `@opencode-ai/sdk` (the official opencode client); every other integration talks to its REST API directly via native `fetch`.
 
@@ -45,16 +45,19 @@ src/
   rateLimit.ts, dedupe.ts, senderLock.ts, sessionStore.ts
   waha/
     client.ts              WAHA REST API wrapper: sendText, startTyping, markChatRead,
-                            sendReaction, editMessage, downloadMedia, fetchGroups, fetchSessionInfo
-    payload.ts              pure parsing of WAHA's raw webhook payload (mentions incl. media
-                            captions, hasMedia/media fields, location, pushName, dedupe key)
+                            sendReaction, editMessage, downloadMedia, fetchGroups, fetchSessionInfo,
+                            fetchRecentMessages (GET .../chats/{chatId}/messages)
+    payload.ts              pure parsing of WAHA's raw webhook + chat-history payloads (mentions
+                            incl. media captions, hasMedia/media fields, location, pushName,
+                            dedupe key, hasDownloadableMedia, and the recent-group-history
+                            trio: trimSinceLastMention, formatRecentMessages, selectRecentMedia)
     identity.ts              @lid <-> phone resolution + bot's own id (for mention detection),
                             group names (getGroupName, cached from the same fetchGroups()
                             call ensureLidMap() already makes)
   integrations/
     firefly.ts, homeAssistant.ts   plain fetch, return Promise<ActionResult>
     opencode.ts                     wraps @opencode-ai/sdk's createOpencodeClient; send()
-                                    takes OpencodeSendOptions ({media?, system?})
+                                    takes OpencodeSendOptions ({media?: OpencodeMediaAttachment[], system?})
   allowlist.ts             who's allowed to trigger the bot, and from where (1:1 vs group + mention gate)
   markdownToWhatsapp.ts    converts the agent's GitHub-flavored-Markdown reply to WhatsApp's
                             own (much smaller) formatting syntax — single *bold*, _italic_,
@@ -62,17 +65,18 @@ src/
                             and restored verbatim so nothing inside them gets rewritten
   router.ts                 text-prefix -> integration dispatch; returns a RouteReply
                             ({kind:"text"} / {kind:"reaction"}). routeMessage/handleAgent
-                            take a RouteExtras ({media?, context?: AgentContext}) — media
-                            and a formatted system-context string both thread through to
-                            OpencodeClient.send; ha:/money: ignore extras entirely. The
-                            agent's reply is passed through markdownToWhatsapp before
-                            being returned (fallback/error strings are not, since they're
-                            already plain text).
+                            take a RouteExtras ({media?: OpencodeMediaAttachment[], context?:
+                            AgentContext}) — media and a formatted system-context string both
+                            thread through to OpencodeClient.send; ha:/money: ignore extras
+                            entirely. The agent's reply is passed through markdownToWhatsapp
+                            before being returned (fallback/error strings are not, since
+                            they're already plain text).
   server.ts                 HTTP wiring: auth, body-size limit, dedupe, rate limit,
                             read receipts, typing indicator, media download
                             (hasDownloadableMedia gate + base64 via waha.downloadMedia),
                             AgentContext extraction (pushName, group name, timestamp,
-                            replyTo, location)
+                            replyTo, location), recent-group-history fetch + trim + media
+                            selection (groups only, skipped for ha:/money:)
   index.ts                  composition root (excluded from coverage/mutation — nothing to unit-test)
 ```
 
@@ -85,6 +89,8 @@ Every class takes its dependencies as constructor arguments — no DI framework,
 **Media download host caveat**: WAHA can self-report `media.url` with a host that's meaningless from another container (observed `http://localhost:3000/...` in production, which resolves to whatsapp-router's own container, not WAHA's — caused every download to fail with `fetch failed`). `WahaClient.downloadMedia` now only trusts the *path* from WAHA's reported url and always fetches against its own configured `baseUrl` for the origin.
 
 **Agent context (`AgentContext`, `router.ts`)**: every agent call's `system` field is built from an `AgentContext` `server.ts` assembles per message — `senderName` (`extractPushName(msg)`, from `_data.pushName` — confirmed against a live payload via the REST chat-history endpoint, absent from WAHA's own webhook docs examples), `senderPhone` (the already-resolved `senderKey`), `isGroupChat`/`groupName` (`identity.getGroupName(from)`), `timestamp`, `replyToText` (`msg.replyTo?.body`), and `locationText` (`formatLocation(msg.location)`). `formatSystemContext()` renders these as short labeled lines, omitting any that are absent — kept deliberately terse (a handful of lines) rather than dumping the raw WAHA payload, since it's resent on every single message. A location-only message (no text, no media) is let through the same way a media-only one is — the `if (!text) return` guard is now `if (!text && !mediaAvailable && !msg.location) return`. vCards (contact cards) aren't parsed or forwarded at all.
+
+**Recent group-history context (`trimSinceLastMention`/`formatRecentMessages`/`selectRecentMedia`, `waha/payload.ts`)**: each opencode session belongs to one sender (`SessionStore` keys by phone number), so in a group with multiple participants, whoever's session responds has no visibility into what anyone *else* in the group said — the per-message context above only covers the single triggering message. To close that gap, group messages (only — 1:1 sessions already have full continuity, and `ha:`/`money:` skip this entirely since they ignore `context`/`media` anyway and it'd just be wasted WAHA calls) fetch recent chat history via `waha.fetchRecentMessages(chatId, RECENT_MESSAGES_FETCH_LIMIT)` and run it through three pure functions: `trimSinceLastMention` drops the triggering message (matched by id) and stops — without including — the first earlier message that itself @-mentions the bot, so nothing already sent to the agent in a prior turn gets resent (walking newest-first, this always lands on the *nearest* prior mention, never an older one further back); `formatRecentMessages` renders what's left as `sender: text` lines, oldest-first, bounded by both a message-count cap (15) and a character budget (2500) — whichever hits first — with media-only messages shown as `[image]`/`[document]`/`[video]`/`[audio]` placeholders; `selectRecentMedia` picks up to `RECENT_MEDIA_MAX` (2) of the most recent downloadable media items from that same trimmed window, downloaded via `waha.downloadMedia` and appended to the same `media` array the triggering message's own attachment goes into (now `OpencodeMediaAttachment[]`, not a single item — `promptMessage` pushes one file part per entry). The whole fetch+trim+download block is wrapped in its own try/catch in `server.ts`: a WAHA hiccup here degrades to "no recent-history context" rather than dropping the reply entirely, since it's enrichment, not the core request.
 
 **Agent identity can't be overridden — the agent is "Sisyphus", full stop**: an earlier version of this feature sent `You are ${agentName}, an AI assistant...` (config'd via `AGENT_NAME`/default "Jarvis"), intending to give the agent a consistent self-identity over WhatsApp. Verified live against the deployed opencode server (Jarvis homelab) that this doesn't work, and traced it to the root cause rather than stopping at "it doesn't work": the server runs the `oh-my-openagent` plugin, whose default agent's compiled system prompt (fetched live via the SDK's `app.agents()` endpoint) opens with an explicit, hardcoded guard —  *"Your designated identity for this session is 'Sisyphus'. This identity supersedes any prior identity statements... Do not identify as any other assistant or AI."* This isn't a soft default that a stronger prompt can out-argue; it's a deliberate anti-impersonation instruction. Three separate override attempts were tried and confirmed ineffective: (1) the per-request `system` field (this repo's own mechanism, any phrasing), (2) oh-my-openagent's documented `agents.sisyphus.prompt_append` config key (edited directly on the Jarvis server, restarted, verified via `app.agents()` that the appended text never even reached the compiled prompt), (3) explicitly selecting an `agent` by name in the SDK request (the config key `sisyphus` isn't a valid SDK agent name — the real registered name is `"Sisyphus - ultraworker"` — passing it caused a 500). A fourth option, renaming the `sisyphus` key in `oh-my-openagent.jsonc` itself (the identity text likely templates off that key), was identified but deliberately not attempted: the literal string `sisyphus` is also used by that plugin's own hooks (`no-sisyphus-gpt`, `sisyphus-junior-notepad`), so renaming it risks breaking real coding-agent usage elsewhere on the same server for an unverified, cosmetic-only payoff. Conclusion: the agent's name is Sisyphus everywhere it's reached, WhatsApp included, and this repo does not try to change that. The rest of the context (sender name, location, platform, chat type) *does* land correctly and is unaffected.
 

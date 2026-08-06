@@ -10,19 +10,25 @@ import type { WahaClientLike } from "./waha/client.js";
 import {
   extractPushName,
   formatLocation,
+  formatRecentMessages,
+  hasDownloadableMedia,
   messageDedupeKey,
+  RECENT_MESSAGES_FETCH_LIMIT,
+  selectRecentMedia,
   stripMentions,
+  trimSinceLastMention,
   type WahaMessage,
   type WahaWebhookPayload,
 } from "./waha/payload.js";
 import { routeMessage, type AgentContext, type RouterDeps } from "./router.js";
 import type { OpencodeMediaAttachment } from "./integrations/opencode.js";
 
-// WAHA reports hasMedia:true even when it couldn't fetch the file itself
-// (media.error set, media.url null) — only worth downloading when there's an
-// actual url to fetch.
-function hasDownloadableMedia(msg: WahaMessage): boolean {
-  return Boolean(msg.hasMedia && msg.media?.url && !msg.media.error);
+// ha:/money: ignore context/media entirely (see router.ts) — skip the recent-
+// history fetch (a real WAHA round-trip plus up to RECENT_MEDIA_MAX downloads)
+// for those so it's never wasted on a route that can't use it.
+function skipsAgentContext(text: string): boolean {
+  const trimmed = text.trim();
+  return /^ha:/i.test(trimmed) || /^money:/i.test(trimmed);
 }
 
 export interface ServerDeps {
@@ -85,15 +91,46 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       log("inbound", from, JSON.stringify(text).slice(0, 200));
       await deps.waha.startTyping(from ?? "");
 
-      let media: OpencodeMediaAttachment | undefined;
+      const media: OpencodeMediaAttachment[] = [];
       if (mediaAvailable && msg.media?.url) {
         const dataBase64 = await deps.waha.downloadMedia(msg.media.url);
         if (dataBase64) {
-          media = {
+          media.push({
             mimetype: msg.media.mimetype ?? "application/octet-stream",
             dataBase64,
             filename: msg.media.filename ?? undefined,
-          };
+          });
+        }
+      }
+
+      // Recent group chatter since the bot's last mention, given as extra
+      // context for messages that arrive without full conversation history of
+      // their own (each opencode session is per-sender, so a session only
+      // ever sees what its own sender typed — not what other participants
+      // said). Real I/O that only groups need, so 1:1 and ha:/money: (which
+      // ignore context/media anyway) skip it; wrapped so a WAHA hiccup here
+      // costs the enrichment, not the whole reply.
+      let recentMessages: string | undefined;
+      if (isGroupMessage && !skipsAgentContext(text)) {
+        try {
+          const history = await deps.waha.fetchRecentMessages(from ?? "", RECENT_MESSAGES_FETCH_LIMIT);
+          // trimSinceLastMention already excludes the triggering message by id —
+          // formatRecentMessages/selectRecentMedia only need their own exclude
+          // param for standalone use, so "" here is a genuine no-op, not a bug.
+          const trimmed = trimSinceLastMention(history, msg.id ?? "", (id) => deps.identity.isBotId(id));
+          recentMessages = formatRecentMessages(trimmed, "");
+          for (const item of selectRecentMedia(trimmed, "")) {
+            const dataBase64 = await deps.waha.downloadMedia(item.media?.url ?? "");
+            if (dataBase64) {
+              media.push({
+                mimetype: item.media?.mimetype ?? "application/octet-stream",
+                dataBase64,
+                filename: item.media?.filename ?? undefined,
+              });
+            }
+          }
+        } catch (err) {
+          log("recent-history fetch failed", err instanceof Error ? err.message : String(err));
         }
       }
 
@@ -105,9 +142,13 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
         timestamp: msg.timestamp,
         replyToText: msg.replyTo?.body,
         locationText: msg.location ? formatLocation(msg.location) : undefined,
+        recentMessages,
       };
 
-      const reply = await routeMessage(deps.router, senderKey, text, { media, context });
+      const reply = await routeMessage(deps.router, senderKey, text, {
+        media: media.length ? media : undefined,
+        context,
+      });
       if (reply.kind === "reaction") {
         await deps.waha.sendReaction(msg.id ?? "", reply.emoji);
         if (reply.text) await deps.waha.sendText(from ?? "", reply.text);

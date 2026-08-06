@@ -29,11 +29,18 @@ export interface AgentContext {
   timestamp?: number;
   replyToText?: string;
   locationText?: string;
+  // Recent group chatter since the bot's last mention — see
+  // waha/payload.ts's formatRecentMessages/trimSinceLastMention.
+  recentMessages?: string;
 }
 
 export interface RouteExtras {
-  media?: OpencodeMediaAttachment;
+  media?: OpencodeMediaAttachment[];
   context?: AgentContext;
+}
+
+function hasMedia(extras: RouteExtras): boolean {
+  return Boolean(extras.media && extras.media.length > 0);
 }
 
 function formatSystemContext(context: AgentContext): string {
@@ -54,6 +61,9 @@ function formatSystemContext(context: AgentContext): string {
   }
   if (context.locationText) {
     lines.push(`Shared location: ${context.locationText}`);
+  }
+  if (context.recentMessages) {
+    lines.push(`Recent messages in this group (oldest first):\n${context.recentMessages}`);
   }
   return lines.join("\n");
 }
@@ -105,10 +115,12 @@ async function handleAgent(
 }
 
 // "/new" resets the sender's session; "ha:"/"money:" dispatch to their
-// integration; anything else falls through to the agent. An image/document
-// attached to the message (any route except /new and the fallback ignores it —
-// ha:/money: aren't media-aware) rides along to the agent as a file part, and
-// context (who/where/how) rides along as the SDK's separate `system` field.
+// integration; anything else falls through to the agent. Attached media
+// (the triggering message's own attachment, plus — for group messages —
+// any recent-history media forwarded alongside it; any route except /new
+// and the fallback ignores it, ha:/money: aren't media-aware) rides along
+// to the agent as file parts, and context (who/where/how) rides along as
+// the SDK's separate `system` field.
 export async function routeMessage(
   deps: RouterDeps,
   senderKey: string,
@@ -121,7 +133,7 @@ export async function routeMessage(
   if (newMatch) {
     deps.sessions.reset(senderKey);
     const rest = (newMatch[1] ?? "").trim();
-    if (!rest && !extras.media && !extras.context?.locationText) {
+    if (!rest && !hasMedia(extras) && !extras.context?.locationText) {
       return { kind: "text", text: "Started a new conversation." };
     }
     return { kind: "text", text: await handleAgent(deps, senderKey, rest, extras) };

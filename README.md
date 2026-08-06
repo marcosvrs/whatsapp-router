@@ -40,6 +40,16 @@ config, hardcoded with an explicit instruction to reject any other name) —
 that's true everywhere it's reached, WhatsApp included, and isn't something
 this repo can or should override.
 
+For group messages, the context also includes recent chatter since the bot's
+last mention — each opencode session belongs to one sender, so without this
+the agent would only ever see what the person talking to it personally typed,
+missing everything anyone else in the group said. Bounded by both a message
+count and a character budget, and trimmed to stop at (not including) the
+previous time the bot was mentioned, so nothing already answered gets resent.
+Up to two of the most recent images/documents in that window are forwarded
+as real attachments, not just described in text; `ha:`/`money:` commands skip
+this fetch entirely since they can't use it anyway.
+
 The agent's reply comes back as standard Markdown, but WhatsApp renders its
 own smaller formatting syntax (single `*bold*`, `_italic_`, `~strike~`,
 triple-backtick monospace only). Replies are converted before sending —
@@ -148,25 +158,27 @@ src/
   actionResult.ts           { ok, text } shape shared by ha:/money: integrations
   rateLimit.ts, dedupe.ts, senderLock.ts, sessionStore.ts
   waha/
-    client.ts              WAHA REST API wrapper — send/react/edit/typing/read-receipts/media
-    payload.ts              parsing WAHA's raw webhook payload (mentions, media, location,
-                            push name, dedupe key)
+    client.ts              WAHA REST API wrapper — send/react/edit/typing/read-receipts/media/
+                            fetchRecentMessages (chat history)
+    payload.ts              parsing WAHA's raw webhook + chat-history payloads (mentions, media,
+                            location, push name, dedupe key, recent-group-history trimming/
+                            formatting/media selection)
     identity.ts              @lid <-> phone resolution, bot's own id, group names
                             (for mention detection and agent context)
   integrations/
     firefly.ts, homeAssistant.ts   plain fetch, return ActionResult
     opencode.ts                     wraps @opencode-ai/sdk; send() takes optional
-                                    media + a system-context string
+                                    media (array) + a system-context string
   allowlist.ts             who's allowed to trigger the bot, and from where
   markdownToWhatsapp.ts    converts the agent's Markdown reply to WhatsApp's
                             own formatting syntax
   router.ts                 prefix -> integration dispatch; returns a RouteReply
                             (text / reaction); builds the agent's system context
-                            from an AgentContext (who/where/when); converts the
-                            agent's reply via markdownToWhatsapp before returning it
+                            from an AgentContext (who/where/when/recent group history);
+                            converts the agent's reply via markdownToWhatsapp before returning it
   server.ts                 HTTP wiring: auth, size limits, dedupe, rate limit,
                             typing indicator, read receipts, media download,
-                            agent-context extraction
+                            agent-context extraction, recent-group-history fetch (groups only)
   index.ts                  composition root
 ```
 

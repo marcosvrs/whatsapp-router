@@ -16,6 +16,7 @@ import { SessionStore } from "../src/sessionStore.js";
 import { buildServer, type ServerDeps } from "../src/server.js";
 import type { IdentityResolver } from "../src/waha/identity.js";
 import type { WahaClientLike } from "../src/waha/client.js";
+import { RECENT_MESSAGES_FETCH_LIMIT, type WahaHistoryMessage } from "../src/waha/payload.js";
 import { requestUrl } from "./testUtils.js";
 
 const SECRET = "test-secret";
@@ -74,6 +75,7 @@ beforeEach(async () => {
     fetchGroups: vi.fn().mockResolvedValue({}),
     fetchSessionInfo: vi.fn().mockResolvedValue(null),
     downloadMedia: vi.fn().mockResolvedValue(null),
+    fetchRecentMessages: vi.fn().mockResolvedValue([]),
   };
 
   identity = {
@@ -640,6 +642,199 @@ describe("server message handling", () => {
       ) as string,
     });
     expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "got your location" }]);
+  });
+
+  function historyItem(overrides: Partial<WahaHistoryMessage> = {}): WahaHistoryMessage {
+    return { id: "h1", body: "hi", fromMe: false, _data: { pushName: "Marcos" }, ...overrides };
+  }
+
+  function mentionHistoryItem(id: string, mentionedId: string): WahaHistoryMessage {
+    return {
+      id,
+      body: `@${mentionedId} earlier question`,
+      _data: { message: { extendedTextMessage: { contextInfo: { mentionedJid: [mentionedId] } } } },
+    };
+  }
+
+  function groupMentionBody(overrides: Record<string, unknown> = {}): string {
+    return messageBody({
+      id: "m1",
+      from: "group@g.us",
+      participant: "111@c.us",
+      body: "@botid new question",
+      _data: {
+        message: { extendedTextMessage: { contextInfo: { mentionedJid: ["botid@lid"] } } },
+      },
+      ...overrides,
+    });
+  }
+
+  describe("recent group-history context", () => {
+    it("fetches recent history for a group message and includes it, trimmed to since the last bot mention", async () => {
+      identity.isBotId = (id) => id === "botid";
+      (deps.waha.fetchRecentMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: "m1", body: "the current triggering message" }, // excluded: it's the trigger
+        historyItem({ id: "h3", body: "third" }),
+        historyItem({ id: "h2", body: "second" }),
+        mentionHistoryItem("h1old", "botid"), // boundary: earlier bot mention, excluded and stops the scan
+        historyItem({ id: "h0", body: "too old, before the earlier mention" }),
+      ]);
+      const capture = captureAgentSystem();
+
+      await postWebhook(groupMentionBody(), { "X-Webhook-Hmac": sign(groupMentionBody()) });
+
+      expect(deps.waha.fetchRecentMessages).toHaveBeenCalledWith(
+        "group@g.us",
+        RECENT_MESSAGES_FETCH_LIMIT,
+      );
+      const system = (capture.body() as { system: string }).system;
+      expect(system).toContain("Recent messages in this group");
+      expect(system).toContain("Marcos: third");
+      expect(system).toContain("Marcos: second");
+      expect(system).not.toContain("too old");
+      expect(system).not.toContain("the current triggering message");
+    });
+
+    it("does not fetch recent history for a 1:1 message", async () => {
+      const capture = captureAgentSystem();
+      const body = messageBody({ body: "hi" });
+      await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+      expect(deps.waha.fetchRecentMessages).not.toHaveBeenCalled();
+      const system = (capture.body() as { system: string }).system;
+      expect(system).not.toContain("Recent messages");
+    });
+
+    it("does not fetch recent history for a ha: group command (never used by those routes)", async () => {
+      identity.isBotId = (id) => id === "botid";
+      const body = groupMentionBody({ body: "@botid ha: turn on lights" });
+      await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+      expect(deps.waha.fetchRecentMessages).not.toHaveBeenCalled();
+    });
+
+    it("does not fetch recent history for a money: group command either", async () => {
+      identity.isBotId = (id) => id === "botid";
+      const body = groupMentionBody({ body: "@botid money: 20 groceries" });
+      await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+      expect(deps.waha.fetchRecentMessages).not.toHaveBeenCalled();
+    });
+
+    it("does fetch recent history when 'ha:'/'money:' appear mid-message rather than as the prefix", async () => {
+      identity.isBotId = (id) => id === "botid";
+      const body = groupMentionBody({ body: "@botid what does ha: mean anyway" });
+      await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+      expect(deps.waha.fetchRecentMessages).toHaveBeenCalledWith("group@g.us", RECENT_MESSAGES_FETCH_LIMIT);
+    });
+
+    it("forwards up to 2 recent media items from group history as attachments, with mimetype/filename intact", async () => {
+      identity.isBotId = (id) => id === "botid";
+      (deps.waha.fetchRecentMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: "m1", body: "the current triggering message" },
+        {
+          id: "img1",
+          hasMedia: true,
+          media: { url: "http://waha.test/f1.jpg", mimetype: "image/jpeg", filename: "photo.jpg" },
+        },
+        { id: "doc1", hasMedia: true, media: { url: "http://waha.test/f2.pdf", mimetype: "application/pdf" } },
+        { id: "img2", hasMedia: true, media: { url: "http://waha.test/f3.jpg", mimetype: "image/jpeg" } },
+      ]);
+      (deps.waha.downloadMedia as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce("base64img")
+        .mockResolvedValueOnce("base64doc");
+      let capturedParts: { type: string; mime?: string; filename?: string; url?: string }[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(async (input: unknown) => {
+          const url = requestUrl(input);
+          if (url.endsWith("/session")) {
+            return new Response(JSON.stringify({ id: "ses_1" }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          const parsed = JSON.parse(await (input as Request).clone().text()) as {
+            parts: { type: string; mime?: string; filename?: string; url?: string }[];
+          };
+          capturedParts = parsed.parts;
+          return new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "ok" }] }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }),
+      );
+
+      await postWebhook(groupMentionBody(), { "X-Webhook-Hmac": sign(groupMentionBody()) });
+
+      expect(deps.waha.downloadMedia).toHaveBeenCalledWith("http://waha.test/f1.jpg");
+      expect(deps.waha.downloadMedia).toHaveBeenCalledWith("http://waha.test/f2.pdf");
+      const fileParts = capturedParts.filter((p) => p.type === "file");
+      expect(fileParts).toEqual([
+        { type: "file", mime: "image/jpeg", filename: "photo.jpg", url: "data:image/jpeg;base64,base64img" },
+        { type: "file", mime: "application/pdf", filename: undefined, url: "data:application/pdf;base64,base64doc" },
+      ]);
+    });
+
+    it("skips a recent media item whose download fails, without dropping the others", async () => {
+      identity.isBotId = (id) => id === "botid";
+      (deps.waha.fetchRecentMessages as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { id: "m1", body: "the current triggering message" },
+        { id: "img1", hasMedia: true, media: { url: "http://waha.test/fails.jpg", mimetype: "image/jpeg" } },
+        { id: "doc1", hasMedia: true, media: { url: "http://waha.test/ok.pdf", mimetype: "application/pdf" } },
+      ]);
+      (deps.waha.downloadMedia as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce("base64doc");
+      let capturedParts: { type: string }[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(async (input: unknown) => {
+          const url = requestUrl(input);
+          if (url.endsWith("/session")) {
+            return new Response(JSON.stringify({ id: "ses_1" }), {
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          const parsed = JSON.parse(await (input as Request).clone().text()) as { parts: { type: string }[] };
+          capturedParts = parsed.parts;
+          return new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "ok" }] }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }),
+      );
+
+      await postWebhook(groupMentionBody(), { "X-Webhook-Hmac": sign(groupMentionBody()) });
+
+      const fileParts = capturedParts.filter((p) => p.type === "file");
+      expect(fileParts).toHaveLength(1);
+    });
+
+    it("still replies when the recent-history fetch fails", async () => {
+      identity.isBotId = (id) => id === "botid";
+      (deps.waha.fetchRecentMessages as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("waha down"));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((input: unknown) => {
+          const url = requestUrl(input);
+          if (url.endsWith("/session")) {
+            return Promise.resolve(
+              new Response(JSON.stringify({ id: "ses_1" }), {
+                headers: { "Content-Type": "application/json" },
+              }),
+            );
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "still works" }] }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }),
+      );
+
+      await postWebhook(groupMentionBody(), { "X-Webhook-Hmac": sign(groupMentionBody()) });
+
+      expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "still works" }]);
+    });
   });
 
   it("does not strip @-mention markup from a 1:1 message", async () => {
