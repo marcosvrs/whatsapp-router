@@ -98,7 +98,6 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       }
 
       const context: AgentContext = {
-        agentName: config.agentName,
         senderName: extractPushName(msg),
         senderPhone: senderKey,
         isGroupChat: isGroupMessage,

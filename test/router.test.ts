@@ -306,7 +306,6 @@ describe("routeMessage — agent context", () => {
     const capture = captureSystem();
     const reply = await routeMessage(deps, "111", "hi", {
       context: {
-        agentName: "Jarvis",
         senderName: "Marcos Vinícius Rubido",
         senderPhone: "111",
         isGroupChat: false,
@@ -317,7 +316,7 @@ describe("routeMessage — agent context", () => {
     expect(reply.text).toBe("ok");
     expect(capture.body()).toMatchObject({
       system:
-        "You are Jarvis, an AI assistant reached over WhatsApp.\n" +
+        "You are being reached over WhatsApp.\n" +
         "Message from: Marcos Vinícius Rubido (+111)\n" +
         "Chat: a direct message (not a group)",
     });
@@ -327,7 +326,6 @@ describe("routeMessage — agent context", () => {
     const capture = captureSystem();
     await routeMessage(deps, "111", "hi", {
       context: {
-        agentName: "Jarvis",
         senderName: "Marcos",
         senderPhone: "111",
         isGroupChat: true,
@@ -337,7 +335,7 @@ describe("routeMessage — agent context", () => {
 
     expect(capture.body()).toMatchObject({
       system:
-        "You are Jarvis, an AI assistant reached over WhatsApp.\n" +
+        "You are being reached over WhatsApp.\n" +
         "Message from: Marcos (+111)\n" +
         'Chat: a group named "Jarvis Test"',
     });
@@ -346,7 +344,7 @@ describe("routeMessage — agent context", () => {
   it("falls back to just the phone number when the sender's push name is unavailable", async () => {
     const capture = captureSystem();
     await routeMessage(deps, "111", "hi", {
-      context: { agentName: "Jarvis", senderPhone: "111", isGroupChat: false },
+      context: { senderPhone: "111", isGroupChat: false },
     });
 
     expect(capture.body()).toMatchObject({
@@ -357,7 +355,7 @@ describe("routeMessage — agent context", () => {
   it("says just 'a group' when the group has no known name", async () => {
     const capture = captureSystem();
     await routeMessage(deps, "111", "hi", {
-      context: { agentName: "Jarvis", senderPhone: "111", isGroupChat: true },
+      context: { senderPhone: "111", isGroupChat: true },
     });
 
     const body = capture.body() as { system: string };
@@ -368,7 +366,6 @@ describe("routeMessage — agent context", () => {
     const capture = captureSystem();
     await routeMessage(deps, "111", "hi", {
       context: {
-        agentName: "Jarvis",
         senderPhone: "111",
         isGroupChat: false,
         timestamp: 1786019629,
@@ -384,7 +381,6 @@ describe("routeMessage — agent context", () => {
     const capture = captureSystem();
     await routeMessage(deps, "111", "hi", {
       context: {
-        agentName: "Jarvis",
         senderPhone: "111",
         isGroupChat: false,
         replyToText: "What time works for you?",
@@ -410,7 +406,6 @@ describe("routeMessage — agent context", () => {
     const capture = captureSystem();
     await routeMessage(deps, "111", "hi", {
       context: {
-        agentName: "Jarvis",
         senderPhone: "111",
         isGroupChat: false,
         locationText: "Our office (38.8937255, -77.0969763)",
@@ -438,7 +433,7 @@ describe("routeMessage — agent context", () => {
     deps.sessions.set("111", "ses_old");
 
     const reply = await routeMessage(deps, "111", "/new", {
-      context: { agentName: "Jarvis", senderPhone: "111", isGroupChat: false, locationText: "1.5, 2.5" },
+      context: { senderPhone: "111", isGroupChat: false, locationText: "1.5, 2.5" },
     });
 
     if (reply.kind !== "text") throw new Error("expected a text reply");

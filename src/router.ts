@@ -22,7 +22,6 @@ function actionReply(result: ActionResult): RouteReply {
 // reached, kept separate from the WhatsApp-domain-agnostic OpencodeClient —
 // router.ts is the layer that knows both "WhatsApp" and "opencode".
 export interface AgentContext {
-  agentName: string;
   senderName?: string;
   senderPhone: string;
   isGroupChat: boolean;
@@ -38,7 +37,7 @@ export interface RouteExtras {
 }
 
 function formatSystemContext(context: AgentContext): string {
-  const lines = [`You are ${context.agentName}, an AI assistant reached over WhatsApp.`];
+  const lines = ["You are being reached over WhatsApp."];
   lines.push(
     `Message from: ${context.senderName ? `${context.senderName} (+${context.senderPhone})` : `+${context.senderPhone}`}`,
   );

@@ -27,13 +27,15 @@ the agent was judged not worth the complexity for now.
 
 The agent gets more than just the message text: every call includes a
 `system` context (kept separate from the SDK's own agent system prompt, and
-from the user's message) telling it who it is (`AGENT_NAME`, default
-"Jarvis"), that it's being reached over WhatsApp, the sender's WhatsApp
-display name and phone number, whether it's a 1:1 or group chat (and the
-group's name, if any), the message's timestamp, the text of whatever message
-it's replying to, and any shared location — everything WAHA exposes about
-the message that's actually worth telling the agent, without dumping raw
-payload noise into its context.
+from the user's message) telling it that it's being reached over WhatsApp,
+the sender's WhatsApp display name and phone number, whether it's a 1:1 or
+group chat (and the group's name, if any), the message's timestamp, the text
+of whatever message it's replying to, and any shared location — everything
+WAHA exposes about the message that's actually worth telling the agent,
+without dumping raw payload noise into its context. Note: this context can't
+override an agent's own configured identity/persona (e.g. a name set by an
+opencode plugin) — the agent will still answer with whatever name it's
+actually configured with.
 
 The agent's reply comes back as standard Markdown, but WhatsApp renders its
 own smaller formatting syntax (single `*bold*`, `_italic_`, `~strike~`,

@@ -38,7 +38,6 @@ function testConfig(): Config {
     opencodeAuthHeader: "",
     opencodeModelProvider: "",
     opencodeModelId: "",
-    agentName: "Jarvis",
     sessionsFile: "",
     maxBodyBytes: 64 * 1024,
     rateLimitMax: 20,
@@ -625,17 +624,6 @@ describe("server message handling", () => {
     const bodyObj = capture.body() as { system: string };
     expect(bodyObj.system).toContain("Sent at: 2026-08-06T12:33:49.000Z");
     expect(bodyObj.system).toContain('Replying to an earlier message: "What time works for you?"');
-  });
-
-  it("uses config.agentName in the system context", async () => {
-    config.agentName = "Hal";
-    const capture = captureAgentSystem();
-    const body = messageBody({ body: "hi" });
-    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
-
-    expect(capture.body()).toMatchObject({
-      system: expect.stringContaining("You are Hal,") as string,
-    });
   });
 
   it("processes a location-only message (no text, no media) instead of dropping it", async () => {
