@@ -1,2 +1,22 @@
 #!/bin/sh
-gitleaks detect --redact -v && npm run typecheck && npm test
+# Secret scanning stays full-history (that's the whole point of it) — it's
+# fast (tens of ms), so scoping it wouldn't save anything meaningful anyway.
+set -e
+gitleaks detect --redact -v
+
+# Typecheck can't safely be scoped to just changed files — a change to a
+# shared type can break correctness elsewhere in the program without
+# touching that file's own text, and TypeScript's checking is inherently
+# whole-program. --incremental (tsconfig.json) caches unchanged files'
+# analysis instead, which is the correct/safe way to speed this up.
+npm run typecheck
+
+# Tests actually CAN be safely scoped: only run tests affected by what's
+# changed since origin/main (via import-graph analysis), not the full suite.
+git fetch origin main --quiet || true
+npx vitest run --changed origin/main
+
+# Same idea for mutation testing, via Stryker's own incremental cache
+# (reports/stryker-incremental.json, gitignored) rather than a git diff —
+# it only re-mutates/re-tests what could have changed status since last run.
+npx stryker run --incremental
