@@ -302,4 +302,115 @@ describe("server message handling", () => {
     expect(sentMessages).toHaveLength(2);
     expect(sentMessages[1]?.text).toBe("Rate limit reached — try again in a few minutes.");
   });
+
+  it("ignores a message with an empty body", async () => {
+    const body = messageBody({ body: "" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("does not strip @-mention markup from a 1:1 message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) {
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+        );
+      }),
+    );
+    const sendSpy = vi.spyOn(deps.router.opencode, "send");
+
+    const body = messageBody({ body: "@someone check this out" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(sendSpy).toHaveBeenCalledWith("ses_1", "@someone check this out");
+  });
+
+  it("does not crash and logs on malformed JSON, after already responding 200", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const body = "not valid json";
+    const res = await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(res.status).toBe(200);
+    expect(sentMessages).toHaveLength(0);
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual([
+      "webhook handling error",
+      expect.stringContaining("JSON"),
+    ]);
+  });
+
+  it("logs the exact rejection reason for a non-allowlisted 1:1 sender", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const body = messageBody({ from: "999@c.us" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["rejected sender", "999@c.us"]);
+  });
+
+  it("logs the exact rejection reason for an unmentioned group message", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    identity.isBotId = () => false;
+    const body = messageBody({ from: "group@g.us", participant: "111@c.us" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual([
+      "ignored group message (not mentioned or not allowed)",
+      "group@g.us",
+    ]);
+  });
+
+  it("logs the exact rate-limit message with the sender key", async () => {
+    deps.rateLimiter = new RateLimiter(0, 5 * 60 * 1000);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const body = messageBody();
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["rate limited", "111"]);
+  });
+
+  it("logs the inbound message with the sender and a truncated preview", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) {
+          return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" })));
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ parts: [{ type: "text", text: "hi!" }] })),
+        );
+      }),
+    );
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const body = messageBody({ body: "hello" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["inbound", "111@c.us", '"hello"']);
+  });
+});
+
+describe("server auth/size log messages", () => {
+  it("logs the exact reason a body is rejected as too large", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const oversized = JSON.stringify({ padding: "x".repeat(config.maxBodyBytes + 1) });
+    await postWebhook(oversized, { "X-Webhook-Hmac": sign(oversized) });
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["rejected webhook: body too large"]);
+  });
+
+  it("logs the exact reason a signature is rejected", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await postWebhook("{}", { "X-Webhook-Hmac": "wrong" });
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["rejected webhook: bad or missing hmac signature"]);
+  });
 });

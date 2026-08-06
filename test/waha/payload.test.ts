@@ -35,6 +35,10 @@ describe("extractMentionedIds", () => {
     };
     expect(extractMentionedIds(msg)).toEqual([]);
   });
+
+  it("returns an empty array for a completely empty message object", () => {
+    expect(extractMentionedIds({})).toEqual([]);
+  });
 });
 
 describe("stripMentions", () => {
@@ -62,5 +66,15 @@ describe("messageDedupeKey", () => {
   it("falls back to from|body|timestamp when id is missing", () => {
     const key = messageDedupeKey({ from: "111@c.us", body: "hi", timestamp: 42 });
     expect(key).toBe("111@c.us|hi|42");
+  });
+
+  it("falls back with empty-string segments when from/body/timestamp are all missing", () => {
+    expect(messageDedupeKey({})).toBe("||");
+  });
+
+  it("produces different keys for different timestamps of an otherwise-identical message", () => {
+    const key1 = messageDedupeKey({ from: "111@c.us", body: "hi", timestamp: 1 });
+    const key2 = messageDedupeKey({ from: "111@c.us", body: "hi", timestamp: 2 });
+    expect(key1).not.toBe(key2);
   });
 });

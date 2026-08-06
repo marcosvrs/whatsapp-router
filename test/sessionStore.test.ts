@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionStore } from "../src/sessionStore.js";
 
 let dir: string;
@@ -76,5 +76,53 @@ describe("SessionStore", () => {
     mkdtempSync(dir);
     const store = new SessionStore(join(dir, "does-not-exist.json"));
     expect(store.get("alice")).toBeUndefined();
+  });
+
+  it("touch still writes to disk even for an unknown sender", () => {
+    const store = new SessionStore(filePath);
+    store.set("alice", "ses_1");
+    const before = readFileSync(filePath, "utf8");
+    rmSync(filePath);
+    store.touch("nobody");
+    // save() ran again (recreated the file from in-memory state) even though
+    // "nobody" was never a known sender.
+    expect(readFileSync(filePath, "utf8")).toBe(before);
+  });
+
+  it("starts empty when the file contains a JSON array instead of an object", () => {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, "[]");
+    const store = new SessionStore(filePath);
+    expect(store.get("alice")).toBeUndefined();
+  });
+
+  it("starts empty when the file contains a bare JSON null", () => {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, "null");
+    const store = new SessionStore(filePath);
+    expect(store.get("alice")).toBeUndefined();
+  });
+
+  it("starts empty when the file contains a bare JSON number", () => {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, "42");
+    const store = new SessionStore(filePath);
+    expect(store.get("alice")).toBeUndefined();
+  });
+
+  it("logs the exact failure message when the file can't be written", () => {
+    // Make the parent path a file instead of a directory, so mkdirSync fails.
+    const blockerPath = join(dir, "blocker");
+    writeFileSync(blockerPath, "not a directory");
+    const badFilePath = join(blockerPath, "sessions.json");
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const store = new SessionStore(badFilePath);
+    store.set("alice", "ses_1");
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const args = logSpy.mock.calls[0] as unknown[];
+    expect(args[1]).toBe("saveSessions failed");
+    logSpy.mockRestore();
   });
 });

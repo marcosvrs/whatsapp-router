@@ -33,4 +33,28 @@ describe("normalizeAmount", () => {
   it("returns null for multiple decimal points after normalization", () => {
     expect(normalizeAmount("1.2.3")).toBeNull();
   });
+
+  it("strips every thousands separator, not just the first, in US style", () => {
+    expect(normalizeAmount("1,234,567.89")).toBe("1234567.89");
+  });
+
+  it("returns null for multiple lone commas with no dot (ambiguous, only the first is treated as decimal)", () => {
+    expect(normalizeAmount("1,234,567")).toBeNull();
+  });
+
+  it("returns null for a trailing decimal point with no digits after it", () => {
+    expect(normalizeAmount("20.")).toBeNull();
+  });
+
+  it("returns null for a leading decimal point with no digits before it", () => {
+    expect(normalizeAmount(".50")).toBeNull();
+  });
+
+  it("returns null for an empty string", () => {
+    expect(normalizeAmount("")).toBeNull();
+  });
+
+  it("returns null for a negative number (not supported)", () => {
+    expect(normalizeAmount("-20")).toBeNull();
+  });
 });

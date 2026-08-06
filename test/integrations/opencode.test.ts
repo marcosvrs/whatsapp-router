@@ -51,6 +51,21 @@ describe("OpencodeClient.createSession", () => {
     const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
     await expect(client.createSession()).rejects.toThrow("session create failed: 500");
   });
+
+  it("posts to /session with the exact method and headers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "ses_1" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    await client.createSession();
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://oc.test/session");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({
+      Authorization: "Basic abc",
+      "Content-Type": "application/json",
+    });
+  });
 });
 
 describe("OpencodeClient.send", () => {
@@ -113,8 +128,80 @@ describe("OpencodeClient.send", () => {
     const client = new OpencodeClient("http://oc.test", "Basic abc", "openai", "gpt-5.6-luna", true);
     await client.send("ses_1", "hi");
 
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://oc.test/session/ses_1/message");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({
+      Authorization: "Basic abc",
+      "Content-Type": "application/json",
+    });
+    const body = JSON.parse(init.body as string) as { model?: unknown; parts?: unknown };
+    expect(body.model).toEqual({ providerID: "openai", modelID: "gpt-5.6-luna" });
+    expect(body.parts).toEqual([{ type: "text", text: "hi" }]);
+  });
+
+  it("omits the model override when only the provider is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ parts: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new OpencodeClient("http://oc.test", "Basic abc", "openai", "", true);
+    await client.send("ses_1", "hi");
+
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string) as { model?: unknown };
-    expect(body.model).toEqual({ providerID: "openai", modelID: "gpt-5.6-luna" });
+    expect(body.model).toBeUndefined();
+  });
+
+  it("omits the model override when only the model id is set", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ parts: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "gpt-5.6-luna", true);
+    await client.send("ses_1", "hi");
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { model?: unknown };
+    expect(body.model).toBeUndefined();
+  });
+
+  it("falls back to the error name when there's no data.message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ info: { error: { name: "APIError" } } })),
+    );
+    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const result = await client.send("ses_1", "hi");
+    expect(result.reply).toBe("Agent error: APIError");
+  });
+
+  it("falls back to 'unknown error' when the error has neither a message nor a name", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ info: { error: {} } })));
+    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const result = await client.send("ses_1", "hi");
+    expect(result.reply).toBe("Agent error: unknown error");
+  });
+
+  it("logs the exact error message it formats", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ info: { error: { name: "APIError" } } })),
+    );
+    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    await client.send("ses_1", "hi");
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["opencode agent error", "APIError"]);
+    logSpy.mockRestore();
+  });
+
+  it("ignores text parts with an empty/undefined text field", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({ parts: [{ type: "text" }, { type: "text", text: "real" }] }),
+      ),
+    );
+    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const result = await client.send("ses_1", "hi");
+    expect(result.reply).toBe("real");
   });
 });

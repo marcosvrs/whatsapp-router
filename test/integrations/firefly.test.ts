@@ -21,6 +21,11 @@ describe("FireflyClient", () => {
     expect(client.isConfigured()).toBe(false);
   });
 
+  it("reports configured when both token and source account are set", () => {
+    const client = new FireflyClient("http://firefly.test", "token", "Checking");
+    expect(client.isConfigured()).toBe(true);
+  });
+
   it("returns a format hint when the text doesn't match amount+description", async () => {
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("groceries");
@@ -39,6 +44,37 @@ describe("FireflyClient", () => {
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("20 groceries");
     expect(reply).toBe('Firefly asset account "Checking" not found.');
+  });
+
+  it("returns a not-found message when the account list omits the matching name", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ data: [{ id: "1", attributes: { name: "Savings" } }] })),
+    );
+    const client = new FireflyClient("http://firefly.test", "token", "Checking");
+    const reply = await client.logTransaction("20 groceries");
+    expect(reply).toBe('Firefly asset account "Checking" not found.');
+  });
+
+  it("requests the accounts lookup with the exact url, method, and headers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new FireflyClient("http://firefly.test", "secret-token", "Checking");
+    await client.logTransaction("20 groceries");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://firefly.test/api/v1/accounts?type=asset&limit=200");
+    expect(init.headers).toEqual({
+      Accept: "application/json",
+      Authorization: "Bearer secret-token",
+    });
+  });
+
+  it("returns a failure message and does not throw when the accounts fetch itself rejects", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    const client = new FireflyClient("http://firefly.test", "token", "Checking");
+    const reply = await client.logTransaction("20 groceries");
+    expect(reply).toBe("Firefly accounts lookup failed: network down");
   });
 
   it("looks up the account once, then reuses it across calls", async () => {
@@ -83,10 +119,19 @@ describe("FireflyClient", () => {
     const body = JSON.parse(transactionCall[1].body as string) as {
       transactions: { source_id: string; amount: string; description: string }[];
     };
-    expect(body.transactions[0]).toMatchObject({
-      source_id: "42",
+    expect(body.transactions[0]).toEqual({
+      type: "withdrawal",
+      date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/) as string,
       amount: "1234.56",
       description: "rent",
+      source_id: "42",
+    });
+    expect(transactionCall[0]).toBe("http://firefly.test/api/v1/transactions");
+    expect(transactionCall[1].method).toBe("POST");
+    expect(transactionCall[1].headers).toEqual({
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: "Bearer token",
     });
   });
 
@@ -106,6 +151,27 @@ describe("FireflyClient", () => {
     const client = new FireflyClient("http://firefly.test", "token", "Checking");
     const reply = await client.logTransaction("20 groceries");
     expect(reply).toBe("Firefly transaction failed (500).");
+  });
+
+  it("logs the exact status and response body when the transaction post fails", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/accounts")) {
+          return Promise.resolve(
+            jsonResponse({ data: [{ id: "42", attributes: { name: "Checking" } }] }),
+          );
+        }
+        return Promise.resolve(new Response("server exploded", { status: 500 }));
+      }),
+    );
+    const client = new FireflyClient("http://firefly.test", "token", "Checking");
+    await client.logTransaction("20 groceries");
+
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["firefly failed", 500, "server exploded"]);
+    logSpy.mockRestore();
   });
 
   it("retries the account lookup on the next call after a transient failure", async () => {

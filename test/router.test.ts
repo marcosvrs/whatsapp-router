@@ -117,4 +117,64 @@ describe("routeMessage — default (agent)", () => {
     const reply = await routeMessage(deps, "111", "hi");
     expect(reply).toBe("opencode agent not configured yet.");
   });
+
+  it("touches (not replaces) the stored session id when it didn't change", async () => {
+    deps.sessions.set("111", "ses_existing");
+    const touchSpy = vi.spyOn(deps.sessions, "touch");
+    const setSpy = vi.spyOn(deps.sessions, "set");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ parts: [{ type: "text", text: "ok" }] })),
+    );
+
+    await routeMessage(deps, "111", "hi again");
+
+    expect(touchSpy).toHaveBeenCalledWith("111");
+    expect(setSpy).not.toHaveBeenCalled();
+  });
+
+  it("replaces the stored session id when opencode recovers from a stale one", async () => {
+    deps.sessions.set("111", "ses_stale");
+    const touchSpy = vi.spyOn(deps.sessions, "touch");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
+        return Promise.resolve(jsonResponse({ status: 404 }, 404));
+      }),
+    );
+
+    const reply = await routeMessage(deps, "111", "hi");
+
+    expect(deps.sessions.get("111")).toBe("ses_new");
+    expect(touchSpy).not.toHaveBeenCalled();
+    expect(reply).not.toBe("Agent call failed — check whatsapp-router logs.");
+  });
+
+  it("returns a failure message and logs when the opencode call throws", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
+    const reply = await routeMessage(deps, "111", "hi");
+    expect(reply).toBe("Agent call failed — check whatsapp-router logs.");
+  });
+
+  it("is case-insensitive and trims surrounding whitespace for every prefix", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
+    const reply = await routeMessage(deps, "111", "  HA:  turn on lights  ");
+    expect(reply).toBe("Sent to Home Assistant.");
+  });
+
+  it("treats a bare '/new' prefix (e.g. '/newfoo') as agent text, not the reset command", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        return Promise.resolve(jsonResponse({ parts: [{ type: "text", text: "handled" }] }));
+      }),
+    );
+    deps.sessions.set("111", "ses_untouched");
+    const reply = await routeMessage(deps, "111", "/newfoo bar");
+    expect(reply).toBe("handled");
+    // "/new" only matches at a word boundary — session must NOT have been reset.
+    expect(deps.sessions.get("111")).not.toBeUndefined();
+  });
 });

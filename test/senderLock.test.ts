@@ -78,4 +78,43 @@ describe("SenderLock", () => {
     const result = await lock.run("a", () => Promise.resolve("recovered"));
     expect(result).toBe("recovered");
   });
+
+  it("keeps a third call waiting on a second, even though the second started after the first finished (map entry must not be cleared early)", async () => {
+    const lock = new SenderLock();
+    const order: string[] = [];
+    const gate1 = deferredVoid();
+    const gate2 = deferredVoid();
+
+    const call1 = lock.run("a", async () => {
+      order.push("1 start");
+      await gate1.promise;
+      order.push("1 end");
+    });
+
+    const call2 = lock.run("a", async () => {
+      order.push("2 start");
+      await gate2.promise;
+      order.push("2 end");
+    });
+
+    gate1.resolve();
+    await call1;
+    // call2 must already be queued behind call1 — it must not have started yet.
+    expect(order).toEqual(["1 start", "1 end"]);
+
+    const call3 = lock.run("a", () => {
+      order.push("3 start");
+      return Promise.resolve();
+    });
+
+    // call3 must wait for call2, not run immediately just because call1 (the
+    // lock's *previous* entry) already finished and got cleaned up.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).not.toContain("3 start");
+
+    gate2.resolve();
+    await Promise.all([call2, call3]);
+    expect(order).toEqual(["1 start", "1 end", "2 start", "2 end", "3 start"]);
+  });
 });
