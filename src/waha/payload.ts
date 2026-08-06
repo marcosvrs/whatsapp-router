@@ -21,13 +21,17 @@ export interface WahaWebhookPayload {
   payload?: WahaMessage;
 }
 
+export function stripJidSuffix(jid: string | undefined): string {
+  return (jid ?? "").split("@")[0] ?? "";
+}
+
 // Confirmed against a live payload: an @-mentioned plain-text message arrives
 // as _data.message.extendedTextMessage.contextInfo.mentionedJid. Other message
 // types (image/video captions, replies) aren't handled — untested shapes, so
 // left alone rather than guessed at.
 export function extractMentionedIds(msg: WahaMessage): string[] {
   const mentioned = msg._data?.message?.extendedTextMessage?.contextInfo?.mentionedJid;
-  return Array.isArray(mentioned) ? mentioned.map((j) => j.split("@")[0] ?? "") : [];
+  return Array.isArray(mentioned) ? mentioned.map(stripJidSuffix) : [];
 }
 
 export function stripMentions(text: string, msg: WahaMessage): string {

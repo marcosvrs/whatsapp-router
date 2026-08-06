@@ -4,7 +4,6 @@ import { log } from "./log.js";
 
 interface SessionEntry {
   sessionId: string;
-  updatedAt: number;
 }
 
 function isSessionRecord(value: unknown): value is Record<string, SessionEntry> {
@@ -35,13 +34,7 @@ export class SessionStore {
   }
 
   set(senderKey: string, sessionId: string): void {
-    this.sessions.set(senderKey, { sessionId, updatedAt: Date.now() });
-    this.save();
-  }
-
-  touch(senderKey: string): void {
-    const entry = this.sessions.get(senderKey);
-    if (entry) entry.updatedAt = Date.now();
+    this.sessions.set(senderKey, { sessionId });
     this.save();
   }
 

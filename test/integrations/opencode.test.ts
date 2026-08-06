@@ -11,11 +11,11 @@ afterEach(() => {
 
 describe("OpencodeClient.isConfigured", () => {
   it("is false without an auth header", () => {
-    expect(new OpencodeClient("http://oc.test", "", "", "", true).isConfigured()).toBe(false);
+    expect(new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "", modelProvider: "", modelId: "", autoApprove: true }).isConfigured()).toBe(false);
   });
 
   it("is true with an auth header", () => {
-    expect(new OpencodeClient("http://oc.test", "Basic abc", "", "", true).isConfigured()).toBe(
+    expect(new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true }).isConfigured()).toBe(
       true,
     );
   });
@@ -26,7 +26,7 @@ describe("OpencodeClient.createSession", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "ses_1" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const id = await client.createSession();
 
     expect(id).toBe("ses_1");
@@ -39,7 +39,7 @@ describe("OpencodeClient.createSession", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "ses_1" }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", false);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: false });
     await client.createSession();
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -48,14 +48,14 @@ describe("OpencodeClient.createSession", () => {
 
   it("throws when session creation fails", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 500 })));
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     await expect(client.createSession()).rejects.toThrow("session create failed: 500");
   });
 
   it("posts to /session with the exact method and headers", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: "ses_1" }));
     vi.stubGlobal("fetch", fetchMock);
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     await client.createSession();
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -82,14 +82,14 @@ describe("OpencodeClient.send", () => {
         }),
       ),
     );
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const result = await client.send("ses_1", "hi");
     expect(result).toEqual({ sessionId: "ses_1", reply: "hello\nworld" });
   });
 
   it("returns a placeholder when there are no text parts", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ parts: [] })));
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const result = await client.send("ses_1", "hi");
     expect(result.reply).toBe("(no output)");
   });
@@ -101,7 +101,7 @@ describe("OpencodeClient.send", () => {
         jsonResponse({ info: { error: { data: { message: "Insufficient balance." } } } }),
       ),
     );
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const result = await client.send("ses_1", "hi");
     expect(result.reply).toBe("Agent error: Insufficient balance.");
   });
@@ -114,7 +114,7 @@ describe("OpencodeClient.send", () => {
       .mockResolvedValueOnce(jsonResponse({ parts: [{ type: "text", text: "ok" }] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const result = await client.send("ses_stale", "hi");
 
     expect(result).toEqual({ sessionId: "ses_new", reply: "ok" });
@@ -125,7 +125,7 @@ describe("OpencodeClient.send", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ parts: [] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "openai", "gpt-5.6-luna", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "openai", modelId: "gpt-5.6-luna", autoApprove: true });
     await client.send("ses_1", "hi");
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -143,7 +143,7 @@ describe("OpencodeClient.send", () => {
   it("omits the model override when only the provider is set", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ parts: [] }));
     vi.stubGlobal("fetch", fetchMock);
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "openai", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "openai", modelId: "", autoApprove: true });
     await client.send("ses_1", "hi");
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -154,7 +154,7 @@ describe("OpencodeClient.send", () => {
   it("omits the model override when only the model id is set", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ parts: [] }));
     vi.stubGlobal("fetch", fetchMock);
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "gpt-5.6-luna", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "gpt-5.6-luna", autoApprove: true });
     await client.send("ses_1", "hi");
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -167,14 +167,14 @@ describe("OpencodeClient.send", () => {
       "fetch",
       vi.fn().mockResolvedValue(jsonResponse({ info: { error: { name: "APIError" } } })),
     );
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const result = await client.send("ses_1", "hi");
     expect(result.reply).toBe("Agent error: APIError");
   });
 
   it("falls back to 'unknown error' when the error has neither a message nor a name", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ info: { error: {} } })));
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const result = await client.send("ses_1", "hi");
     expect(result.reply).toBe("Agent error: unknown error");
   });
@@ -185,7 +185,7 @@ describe("OpencodeClient.send", () => {
       "fetch",
       vi.fn().mockResolvedValue(jsonResponse({ info: { error: { name: "APIError" } } })),
     );
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     await client.send("ses_1", "hi");
 
     const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
@@ -200,7 +200,7 @@ describe("OpencodeClient.send", () => {
         jsonResponse({ parts: [{ type: "text" }, { type: "text", text: "real" }] }),
       ),
     );
-    const client = new OpencodeClient("http://oc.test", "Basic abc", "", "", true);
+    const client = new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true });
     const result = await client.send("ses_1", "hi");
     expect(result.reply).toBe("real");
   });

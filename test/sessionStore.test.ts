@@ -58,35 +58,10 @@ describe("SessionStore", () => {
     expect(store2.get("alice")).toBeUndefined();
   });
 
-  it("touch updates the entry without changing the session id", () => {
-    const store = new SessionStore(filePath);
-    store.set("alice", "ses_1");
-    store.touch("alice");
-    expect(store.get("alice")).toBe("ses_1");
-  });
-
-  it("touch on an unknown sender is a no-op, not an error", () => {
-    const store = new SessionStore(filePath);
-    expect(() => {
-      store.touch("nobody");
-    }).not.toThrow();
-  });
-
   it("starts empty when the file contains invalid JSON", () => {
     mkdtempSync(dir);
     const store = new SessionStore(join(dir, "does-not-exist.json"));
     expect(store.get("alice")).toBeUndefined();
-  });
-
-  it("touch still writes to disk even for an unknown sender", () => {
-    const store = new SessionStore(filePath);
-    store.set("alice", "ses_1");
-    const before = readFileSync(filePath, "utf8");
-    rmSync(filePath);
-    store.touch("nobody");
-    // save() ran again (recreated the file from in-memory state) even though
-    // "nobody" was never a known sender.
-    expect(readFileSync(filePath, "utf8")).toBe(before);
   });
 
   it("starts empty when the file contains a JSON array instead of an object", () => {

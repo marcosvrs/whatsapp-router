@@ -21,7 +21,7 @@ beforeEach(() => {
   deps = {
     ha: new HaClient("http://ha.test", "token", "hook123"),
     firefly: new FireflyClient("http://firefly.test", "token", "Checking"),
-    opencode: new OpencodeClient("http://opencode.test", "Basic abc", "", "", true),
+    opencode: new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "Basic abc", modelProvider: "", modelId: "", autoApprove: true }),
     sessions: new SessionStore(join(dir, "sessions.json")),
     senderLock: new SenderLock(),
   };
@@ -113,14 +113,13 @@ describe("routeMessage — default (agent)", () => {
   });
 
   it("returns a friendly message when opencode isn't configured", async () => {
-    deps.opencode = new OpencodeClient("http://opencode.test", "", "", "", true);
+    deps.opencode = new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "", modelProvider: "", modelId: "", autoApprove: true });
     const reply = await routeMessage(deps, "111", "hi");
     expect(reply).toBe("opencode agent not configured yet.");
   });
 
-  it("touches (not replaces) the stored session id when it didn't change", async () => {
+  it("leaves the stored session id untouched when it didn't change", async () => {
     deps.sessions.set("111", "ses_existing");
-    const touchSpy = vi.spyOn(deps.sessions, "touch");
     const setSpy = vi.spyOn(deps.sessions, "set");
     vi.stubGlobal(
       "fetch",
@@ -129,13 +128,12 @@ describe("routeMessage — default (agent)", () => {
 
     await routeMessage(deps, "111", "hi again");
 
-    expect(touchSpy).toHaveBeenCalledWith("111");
     expect(setSpy).not.toHaveBeenCalled();
+    expect(deps.sessions.get("111")).toBe("ses_existing");
   });
 
   it("replaces the stored session id when opencode recovers from a stale one", async () => {
     deps.sessions.set("111", "ses_stale");
-    const touchSpy = vi.spyOn(deps.sessions, "touch");
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((url: string) => {
@@ -147,7 +145,6 @@ describe("routeMessage — default (agent)", () => {
     const reply = await routeMessage(deps, "111", "hi");
 
     expect(deps.sessions.get("111")).toBe("ses_new");
-    expect(touchSpy).not.toHaveBeenCalled();
     expect(reply).not.toBe("Agent call failed — check whatsapp-router logs.");
   });
 

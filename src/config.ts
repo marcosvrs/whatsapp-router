@@ -17,8 +17,6 @@ export interface Config {
   fireflyDefaultSourceAccount: string;
 
   opencodeBaseUrl: string;
-  opencodeServerUsername: string;
-  opencodeServerPassword: string;
   opencodeAuthHeader: string;
   opencodeModelProvider: string;
   opencodeModelId: string;
@@ -68,8 +66,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     fireflyDefaultSourceAccount: env.FIII_DEFAULT_SOURCE_ACCOUNT ?? "",
 
     opencodeBaseUrl: env.OPENCODE_BASE_URL ?? "http://opencode:4096",
-    opencodeServerUsername,
-    opencodeServerPassword,
     opencodeAuthHeader,
     opencodeModelProvider: env.OPENCODE_MODEL_PROVIDER ?? "",
     opencodeModelId: env.OPENCODE_MODEL_ID ?? "",

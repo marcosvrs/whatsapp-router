@@ -19,14 +19,28 @@ interface OpencodeSessionResponse {
   id: string;
 }
 
+export interface OpencodeClientOptions {
+  baseUrl: string;
+  authHeader: string;
+  modelProvider: string;
+  modelId: string;
+  autoApprove: boolean;
+}
+
 export class OpencodeClient {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly authHeader: string,
-    private readonly modelProvider: string,
-    private readonly modelId: string,
-    private readonly autoApprove: boolean,
-  ) {}
+  private readonly baseUrl: string;
+  private readonly authHeader: string;
+  private readonly modelProvider: string;
+  private readonly modelId: string;
+  private readonly autoApprove: boolean;
+
+  constructor(options: OpencodeClientOptions) {
+    this.baseUrl = options.baseUrl;
+    this.authHeader = options.authHeader;
+    this.modelProvider = options.modelProvider;
+    this.modelId = options.modelId;
+    this.autoApprove = options.autoApprove;
+  }
 
   isConfigured(): boolean {
     return Boolean(this.authHeader);

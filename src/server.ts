@@ -19,6 +19,59 @@ export interface ServerDeps {
 }
 
 export function buildServer(config: Config, deps: ServerDeps): Server {
+  async function handleWebhook(
+    body: string,
+    signature: string | undefined,
+    res: ServerResponse,
+  ): Promise<void> {
+    if (!validWebhookSignature(body, signature, config.webhookSecret)) {
+      log("rejected webhook: bad or missing hmac signature");
+      res.writeHead(401).end();
+      return;
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json" }).end("{}");
+
+    try {
+      const payload = JSON.parse(body) as WahaWebhookPayload;
+      if (payload.event !== "message") return;
+      const msg: WahaMessage = payload.payload ?? {};
+      if (msg.fromMe) return;
+
+      const from = msg.from;
+      const isGroupMessage = (from ?? "").endsWith("@g.us");
+      let text = msg.body ?? "";
+      if (!text) return;
+      if (deps.dedupe.alreadyProcessed(messageDedupeKey(msg))) return;
+
+      const senderKey = await resolveAllowedSender(deps.identity, config.allowedUsers, from, msg);
+      if (!senderKey) {
+        if (isGroupMessage) {
+          log("ignored group message (not mentioned or not allowed)", from);
+        } else {
+          log("rejected sender", from);
+        }
+        return;
+      }
+
+      if (isGroupMessage) {
+        text = stripMentions(text, msg);
+      }
+
+      if (deps.rateLimiter.isLimited(senderKey)) {
+        log("rate limited", senderKey);
+        await deps.waha.sendText(from ?? "", "Rate limit reached — try again in a few minutes.");
+        return;
+      }
+
+      log("inbound", from, JSON.stringify(text).slice(0, 200));
+      const reply = await routeMessage(deps.router, senderKey, text);
+      await deps.waha.sendText(from ?? "", reply);
+    } catch (err) {
+      log("webhook handling error", err instanceof Error ? err.message : String(err));
+    }
+  }
+
   return createServer((req, res) => {
     if (req.method !== "POST" || req.url !== "/webhook") {
       res.writeHead(404).end();
@@ -43,61 +96,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
 
     req.on("end", () => {
       if (tooLarge) return;
-      void handleWebhook(body, signature, res, config, deps);
+      void handleWebhook(body, signature, res);
     });
   });
-}
-
-async function handleWebhook(
-  body: string,
-  signature: string | undefined,
-  res: ServerResponse,
-  config: Config,
-  deps: ServerDeps,
-): Promise<void> {
-  if (!validWebhookSignature(body, signature, config.webhookSecret)) {
-    log("rejected webhook: bad or missing hmac signature");
-    res.writeHead(401).end();
-    return;
-  }
-
-  res.writeHead(200, { "Content-Type": "application/json" }).end("{}");
-
-  try {
-    const payload = JSON.parse(body) as WahaWebhookPayload;
-    if (payload.event !== "message") return;
-    const msg: WahaMessage = payload.payload ?? {};
-    if (msg.fromMe) return;
-
-    const from = msg.from;
-    let text = msg.body ?? "";
-    if (!text) return;
-    if (deps.dedupe.alreadyProcessed(messageDedupeKey(msg))) return;
-
-    const senderKey = await resolveAllowedSender(deps.identity, config.allowedUsers, from, msg);
-    if (!senderKey) {
-      if ((from ?? "").endsWith("@g.us")) {
-        log("ignored group message (not mentioned or not allowed)", from);
-      } else {
-        log("rejected sender", from);
-      }
-      return;
-    }
-
-    if ((from ?? "").endsWith("@g.us")) {
-      text = stripMentions(text, msg);
-    }
-
-    if (deps.rateLimiter.isLimited(senderKey)) {
-      log("rate limited", senderKey);
-      await deps.waha.sendText(from ?? "", "Rate limit reached — try again in a few minutes.");
-      return;
-    }
-
-    log("inbound", from, JSON.stringify(text).slice(0, 200));
-    const reply = await routeMessage(deps.router, senderKey, text);
-    await deps.waha.sendText(from ?? "", reply);
-  } catch (err) {
-    log("webhook handling error", err instanceof Error ? err.message : String(err));
-  }
 }

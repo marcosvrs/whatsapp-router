@@ -5,6 +5,11 @@ import { log } from "./log.js";
 import type { SenderLock } from "./senderLock.js";
 import type { SessionStore } from "./sessionStore.js";
 
+// Concrete classes, not interfaces (unlike ServerDeps in server.ts): tests
+// construct real HaClient/FireflyClient/OpencodeClient instances and stub
+// their one dependency (global fetch) instead, since these classes have no
+// state worth faking and TS structural typing can't match a class type
+// against a hand-rolled fake with private fields.
 export interface RouterDeps {
   ha: HaClient;
   firefly: FireflyClient;
@@ -25,8 +30,6 @@ async function handleAgent(deps: RouterDeps, senderKey: string, text: string): P
       const result = await deps.opencode.send(sessionId, text);
       if (result.sessionId !== sessionId) {
         deps.sessions.set(senderKey, result.sessionId);
-      } else {
-        deps.sessions.touch(senderKey);
       }
       return result.reply;
     });

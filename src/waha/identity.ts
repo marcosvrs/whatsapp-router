@@ -1,5 +1,6 @@
 import { log } from "../log.js";
 import type { WahaClientLike } from "./client.js";
+import { stripJidSuffix } from "./payload.js";
 
 const LID_MAP_TTL_MS = 5 * 60 * 1000;
 
@@ -30,7 +31,7 @@ export class Identity implements IdentityResolver {
       for (const group of Object.values(groups)) {
         for (const p of group.participants ?? []) {
           if (p.id && p.phoneNumber) {
-            map.set(p.id.split("@")[0] ?? "", p.phoneNumber.split("@")[0] ?? "");
+            map.set(stripJidSuffix(p.id), stripJidSuffix(p.phoneNumber));
           }
         }
       }
@@ -43,7 +44,7 @@ export class Identity implements IdentityResolver {
   }
 
   resolvePhone(jid: string | undefined): string | undefined {
-    const raw = (jid ?? "").split("@")[0] ?? "";
+    const raw = stripJidSuffix(jid);
     if ((jid ?? "").endsWith("@lid")) return this.lidToPhone.get(raw);
     return raw;
   }
@@ -58,8 +59,8 @@ export class Identity implements IdentityResolver {
     try {
       const info = await this.waha.fetchSessionInfo();
       if (!info) return;
-      if (info.me?.id) this.botIds.add(info.me.id.split("@")[0] ?? "");
-      if (info.me?.lid) this.botIds.add(info.me.lid.split("@")[0] ?? "");
+      if (info.me?.id) this.botIds.add(stripJidSuffix(info.me.id));
+      if (info.me?.lid) this.botIds.add(stripJidSuffix(info.me.lid));
       this.botIdsLoaded = true;
       log("bot ids loaded", [...this.botIds].join(","));
     } catch (err) {

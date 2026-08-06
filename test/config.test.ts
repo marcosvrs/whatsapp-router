@@ -30,8 +30,6 @@ describe("loadConfig", () => {
       fireflyPat: "",
       fireflyDefaultSourceAccount: "",
       opencodeBaseUrl: "http://opencode:4096",
-      opencodeServerUsername: "opencode",
-      opencodeServerPassword: "",
       opencodeAuthHeader: "",
       opencodeModelProvider: "",
       opencodeModelId: "",

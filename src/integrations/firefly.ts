@@ -28,22 +28,24 @@ export class FireflyClient {
     return Boolean(this.token && this.defaultSourceAccount);
   }
 
-  private async resolveSourceAccountId(): Promise<string | null> {
-    if (this.sourceAccountId) return null;
+  private async resolveSourceAccountId(): Promise<{ id: string } | { error: string }> {
+    if (this.sourceAccountId) return { id: this.sourceAccountId };
     try {
       const res = await fetch(`${this.baseUrl}/api/v1/accounts?type=asset&limit=200`, {
         headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
       });
-      if (!res.ok) return `Firefly accounts lookup failed (${String(res.status)})`;
+      if (!res.ok) return { error: `Firefly accounts lookup failed (${String(res.status)})` };
       const data = (await res.json()) as FireflyAccountsResponse;
       const match = (data.data ?? []).find(
         (a) => a.attributes?.name === this.defaultSourceAccount,
       );
-      if (!match) return `Firefly asset account "${this.defaultSourceAccount}" not found.`;
+      if (!match) return { error: `Firefly asset account "${this.defaultSourceAccount}" not found.` };
       this.sourceAccountId = match.id;
-      return null;
+      return { id: match.id };
     } catch (err) {
-      return `Firefly accounts lookup failed: ${err instanceof Error ? err.message : String(err)}`;
+      return {
+        error: `Firefly accounts lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
 
@@ -61,8 +63,8 @@ export class FireflyClient {
     }
     const description = (match[2] ?? "").trim();
 
-    const lookupError = await this.resolveSourceAccountId();
-    if (lookupError) return lookupError;
+    const lookup = await this.resolveSourceAccountId();
+    if ("error" in lookup) return lookup.error;
 
     const res = await fetch(`${this.baseUrl}/api/v1/transactions`, {
       method: "POST",
