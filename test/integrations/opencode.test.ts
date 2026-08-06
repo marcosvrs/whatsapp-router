@@ -116,9 +116,7 @@ describe("OpencodeClient.send", () => {
   it("attaches a file part alongside the text part when media is provided", async () => {
     sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
     await client().send("ses_1", "check this out", {
-      mimetype: "image/jpeg",
-      dataBase64: "Zm9v",
-      filename: "photo.jpg",
+      media: { mimetype: "image/jpeg", dataBase64: "Zm9v", filename: "photo.jpg" },
     });
 
     expect(sessionPrompt).toHaveBeenCalledWith({
@@ -135,14 +133,53 @@ describe("OpencodeClient.send", () => {
   it("sends only the file part when there is media but no caption text", async () => {
     sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
     await client().send("ses_1", "", {
-      mimetype: "application/pdf",
-      dataBase64: "YmFy",
+      media: { mimetype: "application/pdf", dataBase64: "YmFy" },
     });
 
     expect(sessionPrompt).toHaveBeenCalledWith({
       path: { id: "ses_1" },
       body: {
         parts: [{ type: "file", mime: "application/pdf", filename: undefined, url: "data:application/pdf;base64,YmFy" }],
+      },
+    });
+  });
+
+  it("includes the system field when provided", async () => {
+    sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
+    await client().send("ses_1", "hi", { system: "You are Jarvis, reached via WhatsApp." });
+
+    expect(sessionPrompt).toHaveBeenCalledWith({
+      path: { id: "ses_1" },
+      body: {
+        parts: [{ type: "text", text: "hi" }],
+        system: "You are Jarvis, reached via WhatsApp.",
+      },
+    });
+  });
+
+  it("omits the system field when not provided", async () => {
+    sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
+    await client().send("ses_1", "hi");
+
+    const call = sessionPrompt.mock.calls[0] as [{ body: { system?: unknown } }];
+    expect(call[0].body.system).toBeUndefined();
+  });
+
+  it("includes both media and system together", async () => {
+    sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
+    await client().send("ses_1", "check this out", {
+      media: { mimetype: "image/jpeg", dataBase64: "Zm9v" },
+      system: "You are Jarvis.",
+    });
+
+    expect(sessionPrompt).toHaveBeenCalledWith({
+      path: { id: "ses_1" },
+      body: {
+        parts: [
+          { type: "text", text: "check this out" },
+          { type: "file", mime: "image/jpeg", filename: undefined, url: "data:image/jpeg;base64,Zm9v" },
+        ],
+        system: "You are Jarvis.",
       },
     });
   });

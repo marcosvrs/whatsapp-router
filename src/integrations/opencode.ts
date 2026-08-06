@@ -21,6 +21,14 @@ export interface OpencodeMediaAttachment {
   filename?: string;
 }
 
+export interface OpencodeSendOptions {
+  media?: OpencodeMediaAttachment;
+  // Plain-language context (who's messaging, over what channel, etc.) kept
+  // separate from the user's own message text — passed straight through to
+  // the SDK's per-request `system` field.
+  system?: string;
+}
+
 // Every error variant has a `name`; only some also have a string `data.message`
 // (MessageOutputLengthError's `data` is an untyped bag) — narrow explicitly
 // rather than assume the shape.
@@ -63,7 +71,8 @@ export class OpencodeClient {
     return data.id;
   }
 
-  private promptMessage(sessionId: string, text: string, media?: OpencodeMediaAttachment) {
+  private promptMessage(sessionId: string, text: string, options: OpencodeSendOptions) {
+    const { media, system } = options;
     const parts: (TextPartInput | FilePartInput)[] = [];
     if (text) parts.push({ type: "text", text });
     if (media) {
@@ -78,6 +87,7 @@ export class OpencodeClient {
       path: { id: sessionId },
       body: {
         parts,
+        ...(system ? { system } : {}),
         ...(this.modelProvider && this.modelId
           ? { model: { providerID: this.modelProvider, modelID: this.modelId } }
           : {}),
@@ -86,21 +96,21 @@ export class OpencodeClient {
   }
 
   // Sends text (and optionally one media attachment, e.g. an image/document
-  // forwarded from WhatsApp) to an existing session; if the session is stale
-  // (404 — e.g. the opencode server restarted / db reset), creates a fresh
-  // one and retries once. Returns the session id actually used, so the
-  // caller can persist it if it changed.
+  // forwarded from WhatsApp, and/or system-level context) to an existing
+  // session; if the session is stale (404 — e.g. the opencode server
+  // restarted / db reset), creates a fresh one and retries once. Returns the
+  // session id actually used, so the caller can persist it if it changed.
   async send(
     sessionId: string,
     text: string,
-    media?: OpencodeMediaAttachment,
+    options: OpencodeSendOptions = {},
   ): Promise<{ sessionId: string; reply: string }> {
     let currentSessionId = sessionId;
-    let result = await this.promptMessage(currentSessionId, text, media);
+    let result = await this.promptMessage(currentSessionId, text, options);
 
     if (result.response.status === 404) {
       currentSessionId = await this.createSession();
-      result = await this.promptMessage(currentSessionId, text, media);
+      result = await this.promptMessage(currentSessionId, text, options);
     }
 
     if (!result.data) {

@@ -6,6 +6,7 @@ export interface WahaGroupParticipant {
 }
 
 export interface WahaGroup {
+  subject?: string;
   participants?: WahaGroupParticipant[];
 }
 

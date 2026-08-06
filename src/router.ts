@@ -17,6 +17,47 @@ function actionReply(result: ActionResult): RouteReply {
     : { kind: "reaction", emoji: "❌", text: result.text };
 }
 
+// Everything server.ts can tell the agent about who/where/how it's being
+// reached, kept separate from the WhatsApp-domain-agnostic OpencodeClient —
+// router.ts is the layer that knows both "WhatsApp" and "opencode".
+export interface AgentContext {
+  agentName: string;
+  senderName?: string;
+  senderPhone: string;
+  isGroupChat: boolean;
+  groupName?: string;
+  timestamp?: number;
+  replyToText?: string;
+  locationText?: string;
+}
+
+export interface RouteExtras {
+  media?: OpencodeMediaAttachment;
+  context?: AgentContext;
+}
+
+function formatSystemContext(context: AgentContext): string {
+  const lines = [`You are ${context.agentName}, an AI assistant reached over WhatsApp.`];
+  lines.push(
+    `Message from: ${context.senderName ? `${context.senderName} (+${context.senderPhone})` : `+${context.senderPhone}`}`,
+  );
+  lines.push(
+    context.isGroupChat
+      ? `Chat: a group${context.groupName ? ` named "${context.groupName}"` : ""}`
+      : "Chat: a direct message (not a group)",
+  );
+  if (context.timestamp) {
+    lines.push(`Sent at: ${new Date(context.timestamp * 1000).toISOString()}`);
+  }
+  if (context.replyToText) {
+    lines.push(`Replying to an earlier message: "${context.replyToText}"`);
+  }
+  if (context.locationText) {
+    lines.push(`Shared location: ${context.locationText}`);
+  }
+  return lines.join("\n");
+}
+
 // Concrete classes, not interfaces (unlike ServerDeps in server.ts): tests
 // construct real HaClient/FireflyClient/OpencodeClient instances and stub
 // their one dependency (global fetch) instead, since these classes have no
@@ -34,7 +75,7 @@ async function handleAgent(
   deps: RouterDeps,
   senderKey: string,
   text: string,
-  media?: OpencodeMediaAttachment,
+  extras: RouteExtras,
 ): Promise<string> {
   if (!deps.opencode.isConfigured()) return "opencode agent not configured yet.";
   try {
@@ -44,7 +85,10 @@ async function handleAgent(
         sessionId = await deps.opencode.createSession();
         deps.sessions.set(senderKey, sessionId);
       }
-      const result = await deps.opencode.send(sessionId, text, media);
+      const result = await deps.opencode.send(sessionId, text, {
+        media: extras.media,
+        system: extras.context ? formatSystemContext(extras.context) : undefined,
+      });
       if (result.sessionId !== sessionId) {
         deps.sessions.set(senderKey, result.sessionId);
       }
@@ -59,12 +103,13 @@ async function handleAgent(
 // "/new" resets the sender's session; "ha:"/"money:" dispatch to their
 // integration; anything else falls through to the agent. An image/document
 // attached to the message (any route except /new and the fallback ignores it —
-// ha:/money: aren't media-aware) rides along to the agent as a file part.
+// ha:/money: aren't media-aware) rides along to the agent as a file part, and
+// context (who/where/how) rides along as the SDK's separate `system` field.
 export async function routeMessage(
   deps: RouterDeps,
   senderKey: string,
   text: string,
-  media?: OpencodeMediaAttachment,
+  extras: RouteExtras = {},
 ): Promise<RouteReply> {
   const trimmed = text.trim();
 
@@ -72,8 +117,10 @@ export async function routeMessage(
   if (newMatch) {
     deps.sessions.reset(senderKey);
     const rest = (newMatch[1] ?? "").trim();
-    if (!rest && !media) return { kind: "text", text: "Started a new conversation." };
-    return { kind: "text", text: await handleAgent(deps, senderKey, rest, media) };
+    if (!rest && !extras.media && !extras.context?.locationText) {
+      return { kind: "text", text: "Started a new conversation." };
+    }
+    return { kind: "text", text: await handleAgent(deps, senderKey, rest, extras) };
   }
 
   const haMatch = /^ha:(.*)$/i.exec(trimmed);
@@ -82,5 +129,5 @@ export async function routeMessage(
   const moneyMatch = /^money:(.*)$/i.exec(trimmed);
   if (moneyMatch) return actionReply(await deps.firefly.logTransaction((moneyMatch[1] ?? "").trim()));
 
-  return { kind: "text", text: await handleAgent(deps, senderKey, trimmed, media) };
+  return { kind: "text", text: await handleAgent(deps, senderKey, trimmed, extras) };
 }

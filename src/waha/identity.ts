@@ -9,6 +9,7 @@ export interface IdentityResolver {
   ensureBotIds: () => Promise<void>;
   resolvePhone: (jid: string | undefined) => string | undefined;
   isBotId: (id: string) => boolean;
+  getGroupName: (groupId: string) => string | undefined;
 }
 
 // WhatsApp's privacy-ID layer means inbound senders can show up as "<lid>@lid"
@@ -17,6 +18,7 @@ export interface IdentityResolver {
 // participant lists instead — those carry both id (lid) and phoneNumber directly.
 export class Identity implements IdentityResolver {
   private lidToPhone = new Map<string, string>();
+  private groupNames = new Map<string, string>();
   private lidMapLoadedAt = 0;
   private readonly botIds = new Set<string>();
   private botIdsLoaded = false;
@@ -28,7 +30,9 @@ export class Identity implements IdentityResolver {
     try {
       const groups = await this.waha.fetchGroups();
       const map = new Map<string, string>();
-      for (const group of Object.values(groups)) {
+      const names = new Map<string, string>();
+      for (const [groupId, group] of Object.entries(groups)) {
+        if (group.subject) names.set(groupId, group.subject);
         for (const p of group.participants ?? []) {
           if (p.id && p.phoneNumber) {
             map.set(stripJidSuffix(p.id), stripJidSuffix(p.phoneNumber));
@@ -36,6 +40,7 @@ export class Identity implements IdentityResolver {
         }
       }
       this.lidToPhone = map;
+      this.groupNames = names;
       this.lidMapLoadedAt = Date.now();
       log("lid map refreshed", map.size, "entries");
     } catch (err) {
@@ -47,6 +52,12 @@ export class Identity implements IdentityResolver {
     const raw = stripJidSuffix(jid);
     if ((jid ?? "").endsWith("@lid")) return this.lidToPhone.get(raw);
     return raw;
+  }
+
+  // Sourced from the same fetchGroups() call ensureLidMap() already makes —
+  // no extra network round-trip.
+  getGroupName(groupId: string): string | undefined {
+    return this.groupNames.get(groupId);
   }
 
   // The bot's own identifiers (both phone-based and @lid forms), used to detect

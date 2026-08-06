@@ -11,6 +11,18 @@ export interface WahaMessageMedia {
   error?: string | null;
 }
 
+export interface WahaReplyTo {
+  body?: string;
+}
+
+// Mirrors WAHA's send-location request shape ({latitude, longitude, title})
+// — not independently confirmed on the receive side against a live payload.
+export interface WahaLocation {
+  latitude?: number;
+  longitude?: number;
+  title?: string | null;
+}
+
 export interface WahaMessage {
   id?: string;
   from?: string;
@@ -20,7 +32,13 @@ export interface WahaMessage {
   participant?: string;
   hasMedia?: boolean;
   media?: WahaMessageMedia;
+  location?: WahaLocation;
+  replyTo?: WahaReplyTo;
+  // pushName is the sender's WhatsApp display name — confirmed against a
+  // live payload (via the REST chat-history endpoint; not shown in WAHA's
+  // own webhook docs examples, but the same underlying message shape).
   _data?: {
+    pushName?: string;
     message?: {
       extendedTextMessage?: WahaMessageContextInfo;
       // Mirrors extendedTextMessage's shape per WhatsApp's standard (Baileys)
@@ -62,6 +80,15 @@ export function stripMentions(text: string, msg: WahaMessage): string {
   let out = text;
   for (const id of extractMentionedIds(msg)) out = out.replaceAll(`@${id}`, "");
   return out.trim();
+}
+
+export function extractPushName(msg: WahaMessage): string | undefined {
+  return msg._data?.pushName;
+}
+
+export function formatLocation(location: WahaLocation): string {
+  const coords = `${String(location.latitude ?? "?")}, ${String(location.longitude ?? "?")}`;
+  return location.title ? `${location.title} (${coords})` : coords;
 }
 
 export function messageDedupeKey(msg: WahaMessage): string {

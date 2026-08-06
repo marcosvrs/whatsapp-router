@@ -99,6 +99,37 @@ describe("Identity.ensureLidMap / resolvePhone", () => {
   });
 });
 
+describe("Identity.getGroupName", () => {
+  it("returns the group's subject once loaded, keyed by the group's own jid", async () => {
+    const groups: Record<string, WahaGroup> = {
+      "120363429567768095@g.us": { subject: "Jarvis Test", participants: [] },
+    };
+    const identity = new Identity(fakeWaha({ fetchGroups: vi.fn().mockResolvedValue(groups) }));
+    await identity.ensureLidMap();
+    expect(identity.getGroupName("120363429567768095@g.us")).toBe("Jarvis Test");
+  });
+
+  it("returns undefined for an unknown group", async () => {
+    const identity = new Identity(fakeWaha({ fetchGroups: vi.fn().mockResolvedValue({}) }));
+    await identity.ensureLidMap();
+    expect(identity.getGroupName("unknown@g.us")).toBeUndefined();
+  });
+
+  it("returns undefined before the lid map has ever loaded", () => {
+    const identity = new Identity(fakeWaha());
+    expect(identity.getGroupName("120363429567768095@g.us")).toBeUndefined();
+  });
+
+  it("skips groups with no subject", async () => {
+    const groups: Record<string, WahaGroup> = {
+      "g1@g.us": { participants: [] },
+    };
+    const identity = new Identity(fakeWaha({ fetchGroups: vi.fn().mockResolvedValue(groups) }));
+    await identity.ensureLidMap();
+    expect(identity.getGroupName("g1@g.us")).toBeUndefined();
+  });
+});
+
 describe("Identity.ensureBotIds / isBotId", () => {
   it("loads both the phone and lid forms of the bot's own id", async () => {
     const info: WahaSessionInfo = { me: { id: "555@c.us", lid: "777@lid" } };

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Routes WhatsApp messages — received via a self-hosted WAHA (WhatsApp HTTP API) instance — to one of three integrations based on a text prefix: `/new` (resets the sender's opencode agent session), `ha:` (a Home Assistant webhook), `money:` (a Firefly III transaction), or anything else (the opencode agent, one persistent session per sender). Works in 1:1 chats or in any group the bot is added to, as long as the sender is allowlisted and @-mentions the bot. `ha:`/`money:` react ✅/❌ on the original message instead of replying with text (❌ is followed by a text explanation); the agent path shows WhatsApp's native typing indicator while it works, then sends the real reply once — no placeholder message (a placeholder-then-edit approach was tried and deliberately reverted; see the request-flow note below). Every inbound message gets a read receipt. Images/documents are downloaded and forwarded to the agent as a file part (`ha:`/`money:` ignore attachments — they aren't media-aware).
+Routes WhatsApp messages — received via a self-hosted WAHA (WhatsApp HTTP API) instance — to one of three integrations based on a text prefix: `/new` (resets the sender's opencode agent session), `ha:` (a Home Assistant webhook), `money:` (a Firefly III transaction), or anything else (the opencode agent, one persistent session per sender). Works in 1:1 chats or in any group the bot is added to, as long as the sender is allowlisted and @-mentions the bot. `ha:`/`money:` react ✅/❌ on the original message instead of replying with text (❌ is followed by a text explanation); the agent path shows WhatsApp's native typing indicator while it works, then sends the real reply once — no placeholder message (a placeholder-then-edit approach was tried and deliberately reverted; see the request-flow note below). Every inbound message gets a read receipt. Images/documents are downloaded and forwarded to the agent as a file part; a shared location is described in words; `ha:`/`money:` ignore attachments/locations — they aren't media-aware. The agent also gets a `system`-field context per message (who's messaging, over WhatsApp, 1:1 or which group, when, replying to what) — see the request-flow note below.
 
 WAHA itself is purely a transport layer with no routing, per-sender state, or allowlist concept — this service is that glue, kept intentionally small: a single Node HTTP server, no framework, plain constructor-injected classes per integration. The only production dependency is `@opencode-ai/sdk` (the official opencode client); every other integration talks to its REST API directly via native `fetch`.
 
@@ -47,20 +47,25 @@ src/
     client.ts              WAHA REST API wrapper: sendText, startTyping, markChatRead,
                             sendReaction, editMessage, downloadMedia, fetchGroups, fetchSessionInfo
     payload.ts              pure parsing of WAHA's raw webhook payload (mentions incl. media
-                            captions, hasMedia/media fields, dedupe key)
-    identity.ts              @lid <-> phone resolution + bot's own id (for mention detection)
+                            captions, hasMedia/media fields, location, pushName, dedupe key)
+    identity.ts              @lid <-> phone resolution + bot's own id (for mention detection),
+                            group names (getGroupName, cached from the same fetchGroups()
+                            call ensureLidMap() already makes)
   integrations/
     firefly.ts, homeAssistant.ts   plain fetch, return Promise<ActionResult>
     opencode.ts                     wraps @opencode-ai/sdk's createOpencodeClient; send()
-                                    takes an optional OpencodeMediaAttachment (file part)
+                                    takes OpencodeSendOptions ({media?, system?})
   allowlist.ts             who's allowed to trigger the bot, and from where (1:1 vs group + mention gate)
   router.ts                 text-prefix -> integration dispatch; returns a RouteReply
                             ({kind:"text"} / {kind:"reaction"}). routeMessage/handleAgent
-                            take an optional media param threaded through to
-                            OpencodeClient.send — ha:/money: ignore it.
+                            take a RouteExtras ({media?, context?: AgentContext}) — media
+                            and a formatted system-context string both thread through to
+                            OpencodeClient.send; ha:/money: ignore extras entirely.
   server.ts                 HTTP wiring: auth, body-size limit, dedupe, rate limit,
                             read receipts, typing indicator, media download
-                            (hasDownloadableMedia gate + base64 via waha.downloadMedia)
+                            (hasDownloadableMedia gate + base64 via waha.downloadMedia),
+                            AgentContext extraction (pushName, group name, timestamp,
+                            replyTo, location)
   index.ts                  composition root (excluded from coverage/mutation — nothing to unit-test)
 ```
 
@@ -72,6 +77,8 @@ Every class takes its dependencies as constructor arguments — no DI framework,
 
 **Media download host caveat**: WAHA can self-report `media.url` with a host that's meaningless from another container (observed `http://localhost:3000/...` in production, which resolves to whatsapp-router's own container, not WAHA's — caused every download to fail with `fetch failed`). `WahaClient.downloadMedia` now only trusts the *path* from WAHA's reported url and always fetches against its own configured `baseUrl` for the origin.
 
+**Agent context (`AgentContext`, `router.ts`)**: every agent call's `system` field is built from an `AgentContext` `server.ts` assembles per message — `agentName` (`config.agentName`/`AGENT_NAME`, default "Jarvis"), `senderName` (`extractPushName(msg)`, from `_data.pushName` — confirmed against a live payload via the REST chat-history endpoint, absent from WAHA's own webhook docs examples), `senderPhone` (the already-resolved `senderKey`), `isGroupChat`/`groupName` (`identity.getGroupName(from)`), `timestamp`, `replyToText` (`msg.replyTo?.body`), and `locationText` (`formatLocation(msg.location)`). `formatSystemContext()` renders these as short labeled lines, omitting any that are absent — kept deliberately terse (a handful of lines) rather than dumping the raw WAHA payload, since it's resent on every single message. A location-only message (no text, no media) is let through the same way a media-only one is — the `if (!text) return` guard is now `if (!text && !mediaAvailable && !msg.location) return`. vCards (contact cards) aren't parsed or forwarded at all.
+
 **opencode integration**: `integrations/opencode.ts` is a thin wrapper around `@opencode-ai/sdk`'s `createOpencodeClient()` — no raw `fetch` calls to the opencode server anywhere in the codebase. `session.create()` only accepts `{ parentID?, title? }` in this SDK version (verified against the real deployed server — a permission/auto-approve body sent to it is a no-op today), so session creation is a plain `client.session.create({})`. The `send(sessionId, text, media?)` method calls `client.session.prompt(...)` with a `parts` array built from a `TextPartInput` (only when `text` is non-empty) and/or a `FilePartInput` (when `media` is present, as a `data:<mimetype>;base64,...` URI — WAHA's own media URL requires an `X-Api-Key` header the SDK has no way to attach, so the file is downloaded and inlined rather than referenced by URL), retries once via a fresh session on a 404 (stale session), and narrows `AssistantMessage["error"]` per-variant since only some error shapes guarantee a `data.message` string (`MessageOutputLengthError`'s `data` is an untyped bag — falls back to `error.name`).
 
-**Known limitation**: mention detection recognizes plain-text messages (`extendedTextMessage.contextInfo.mentionedJid`, confirmed against a live WAHA payload) and, assumed to mirror that shape, image/document/video captions (`imageMessage`/`documentMessage`/`videoMessage.contextInfo.mentionedJid` — **not independently confirmed** against a live payload; check this first if group @-mentions on media captions don't work). A mention inside a reply uses a different message shape and isn't handled at all.
+**Known limitations**: mention detection recognizes plain-text messages (`extendedTextMessage.contextInfo.mentionedJid`, confirmed against a live WAHA payload) and, assumed to mirror that shape, image/document/video captions (`imageMessage`/`documentMessage`/`videoMessage.contextInfo.mentionedJid` — **not independently confirmed** against a live payload; check this first if group @-mentions on media captions don't work). A mention inside a reply uses a different message shape and isn't handled at all. `WahaLocation` mirrors WAHA's documented *send*-location shape (`latitude`/`longitude`/`title`) — the receive side isn't independently confirmed either.

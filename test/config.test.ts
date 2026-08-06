@@ -33,6 +33,7 @@ describe("loadConfig", () => {
       opencodeAuthHeader: "",
       opencodeModelProvider: "",
       opencodeModelId: "",
+      agentName: "Jarvis",
       sessionsFile: "/app/state/sessions.json",
       maxBodyBytes: 65536,
       rateLimitMax: 20,
@@ -98,6 +99,14 @@ describe("loadConfig", () => {
     expect(config.opencodeAuthHeader).toBe(
       `Basic ${Buffer.from("opencode:pass").toString("base64")}`,
     );
+  });
+
+  it("defaults agentName to 'Jarvis'", () => {
+    expect(loadConfig(baseEnv()).agentName).toBe("Jarvis");
+  });
+
+  it("overrides agentName via AGENT_NAME", () => {
+    expect(loadConfig(baseEnv({ AGENT_NAME: "Hal" })).agentName).toBe("Hal");
   });
 
   it("parses numeric overrides for rate limiting", () => {

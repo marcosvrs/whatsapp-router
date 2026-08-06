@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   extractMentionedIds,
+  extractPushName,
+  formatLocation,
   messageDedupeKey,
   stripMentions,
   type WahaMessage,
@@ -116,5 +118,32 @@ describe("messageDedupeKey", () => {
     const key1 = messageDedupeKey({ from: "111@c.us", body: "hi", timestamp: 1 });
     const key2 = messageDedupeKey({ from: "111@c.us", body: "hi", timestamp: 2 });
     expect(key1).not.toBe(key2);
+  });
+});
+
+describe("extractPushName", () => {
+  it("returns the sender's WhatsApp display name from _data.pushName", () => {
+    const msg: WahaMessage = { _data: { pushName: "Marcos Vinícius Rubido" } };
+    expect(extractPushName(msg)).toBe("Marcos Vinícius Rubido");
+  });
+
+  it("returns undefined when _data is missing", () => {
+    expect(extractPushName({})).toBeUndefined();
+  });
+
+  it("returns undefined when _data.pushName is absent", () => {
+    expect(extractPushName({ _data: {} })).toBeUndefined();
+  });
+});
+
+describe("formatLocation", () => {
+  it("includes the title alongside coordinates when present", () => {
+    expect(formatLocation({ latitude: 38.8937255, longitude: -77.0969763, title: "Our office" })).toBe(
+      "Our office (38.8937255, -77.0969763)",
+    );
+  });
+
+  it("falls back to just coordinates when there's no title", () => {
+    expect(formatLocation({ latitude: 1.5, longitude: 2.5 })).toBe("1.5, 2.5");
   });
 });

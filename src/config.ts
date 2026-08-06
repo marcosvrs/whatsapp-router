@@ -20,6 +20,7 @@ export interface Config {
   opencodeAuthHeader: string;
   opencodeModelProvider: string;
   opencodeModelId: string;
+  agentName: string;
 
   sessionsFile: string;
 
@@ -68,6 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     opencodeAuthHeader,
     opencodeModelProvider: env.OPENCODE_MODEL_PROVIDER ?? "",
     opencodeModelId: env.OPENCODE_MODEL_ID ?? "",
+    agentName: env.AGENT_NAME ?? "Jarvis",
 
     sessionsFile: env.SESSIONS_FILE ?? "/app/state/sessions.json",
 

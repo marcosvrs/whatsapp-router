@@ -19,8 +19,21 @@ typing indicator shows while the agent is working.
 Works in a 1:1 chat with the bot, or in any group it's added to — as long as
 the sender is allowlisted and @-mentions the bot. Images and documents are
 downloaded and forwarded to the opencode agent as an attachment (alongside
-any caption text as the message); `ha:`/`money:` aren't media-aware, so an
-attachment on one of those is simply ignored.
+any caption text as the message); a shared location is described in words
+instead (no attachment to forward); `ha:`/`money:` aren't media-aware, so an
+attachment or location on one of those is simply ignored. WhatsApp contact
+cards (vCards) aren't handled — parsing them into something worth passing to
+the agent was judged not worth the complexity for now.
+
+The agent gets more than just the message text: every call includes a
+`system` context (kept separate from the SDK's own agent system prompt, and
+from the user's message) telling it who it is (`AGENT_NAME`, default
+"Jarvis"), that it's being reached over WhatsApp, the sender's WhatsApp
+display name and phone number, whether it's a 1:1 or group chat (and the
+group's name, if any), the message's timestamp, the text of whatever message
+it's replying to, and any shared location — everything WAHA exposes about
+the message that's actually worth telling the agent, without dumping raw
+payload noise into its context.
 
 ## Why this exists
 
@@ -126,16 +139,21 @@ src/
   rateLimit.ts, dedupe.ts, senderLock.ts, sessionStore.ts
   waha/
     client.ts              WAHA REST API wrapper — send/react/edit/typing/read-receipts/media
-    payload.ts              parsing WAHA's raw webhook payload (mentions, media, dedupe key)
-    identity.ts              @lid <-> phone resolution, bot's own id (for mention detection)
+    payload.ts              parsing WAHA's raw webhook payload (mentions, media, location,
+                            push name, dedupe key)
+    identity.ts              @lid <-> phone resolution, bot's own id, group names
+                            (for mention detection and agent context)
   integrations/
     firefly.ts, homeAssistant.ts   plain fetch, return ActionResult
-    opencode.ts                     wraps @opencode-ai/sdk
+    opencode.ts                     wraps @opencode-ai/sdk; send() takes optional
+                                    media + a system-context string
   allowlist.ts             who's allowed to trigger the bot, and from where
   router.ts                 prefix -> integration dispatch; returns a RouteReply
-                            (text / reaction)
+                            (text / reaction); builds the agent's system context
+                            from an AgentContext (who/where/when)
   server.ts                 HTTP wiring: auth, size limits, dedupe, rate limit,
-                            typing indicator, read receipts, media download
+                            typing indicator, read receipts, media download,
+                            agent-context extraction
   index.ts                  composition root
 ```
 
@@ -143,16 +161,21 @@ Each class takes its dependencies as constructor arguments — no DI framework,
 no global state — which is what makes the whole thing unit-testable without
 a running WAHA/opencode/Firefly/Home Assistant instance in the loop.
 
-## Known limitation
+## Known limitations
 
-Mention detection recognizes plain-text messages
-(`extendedTextMessage.contextInfo.mentionedJid`, confirmed against a live WAHA
-payload) and, on the assumption it mirrors that same shape, image/document/video
-captions (`imageMessage`/`documentMessage`/`videoMessage.contextInfo.mentionedJid`
-— **not** independently confirmed against a live payload; if @-mentioning the
-bot in a group photo/document caption doesn't work, this is the first thing to
-check). A mention inside a reply uses a different message shape and isn't
-handled at all — left alone rather than guessed at.
+- Mention detection recognizes plain-text messages
+  (`extendedTextMessage.contextInfo.mentionedJid`, confirmed against a live WAHA
+  payload) and, on the assumption it mirrors that same shape, image/document/video
+  captions (`imageMessage`/`documentMessage`/`videoMessage.contextInfo.mentionedJid`
+  — **not** independently confirmed against a live payload; if @-mentioning the
+  bot in a group photo/document caption doesn't work, this is the first thing to
+  check). A mention inside a reply uses a different message shape and isn't
+  handled at all — left alone rather than guessed at.
+- Location messages (`WahaLocation`, `latitude`/`longitude`/`title`) mirror
+  WAHA's documented *send*-location request shape — the receive side isn't
+  independently confirmed against a live payload either.
+- Contact cards (vCards) aren't parsed or forwarded at all; a shared contact
+  is silently ignored.
 
 ## License
 

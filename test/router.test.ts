@@ -109,7 +109,7 @@ async function agentText(
   text: string,
   media?: OpencodeMediaAttachment,
 ): Promise<string> {
-  const reply = await routeMessage(deps, senderKey, text, media);
+  const reply = await routeMessage(deps, senderKey, text, media ? { media } : {});
   if (reply.kind !== "text") throw new Error(`expected a text reply, got ${reply.kind}`);
   return reply.text;
 }
@@ -267,6 +267,166 @@ describe("routeMessage — /new with media", () => {
     const reply = await agentText(deps, "111", "/new", media);
 
     expect(reply).toBe("new session, got it");
+    expect(deps.sessions.get("111")).toBe("ses_new");
+  });
+});
+
+describe("routeMessage — agent context", () => {
+  function captureSystem(finalReply = "ok"): { body: () => unknown } {
+    let capturedBody: unknown;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return jsonResponse({ id: "ses_1" });
+        capturedBody = JSON.parse(await (input as Request).clone().text()) as unknown;
+        return jsonResponse({ info: {}, parts: [{ type: "text", text: finalReply }] });
+      }),
+    );
+    return { body: () => capturedBody };
+  }
+
+  it("formats a 1:1-chat system context with the sender's name and phone", async () => {
+    const capture = captureSystem();
+    const reply = await routeMessage(deps, "111", "hi", {
+      context: {
+        agentName: "Jarvis",
+        senderName: "Marcos Vinícius Rubido",
+        senderPhone: "111",
+        isGroupChat: false,
+      },
+    });
+
+    if (reply.kind !== "text") throw new Error("expected a text reply");
+    expect(reply.text).toBe("ok");
+    expect(capture.body()).toMatchObject({
+      system:
+        "You are Jarvis, an AI assistant reached over WhatsApp.\n" +
+        "Message from: Marcos Vinícius Rubido (+111)\n" +
+        "Chat: a direct message (not a group)",
+    });
+  });
+
+  it("formats a group-chat system context with the group's name", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: {
+        agentName: "Jarvis",
+        senderName: "Marcos",
+        senderPhone: "111",
+        isGroupChat: true,
+        groupName: "Jarvis Test",
+      },
+    });
+
+    expect(capture.body()).toMatchObject({
+      system:
+        "You are Jarvis, an AI assistant reached over WhatsApp.\n" +
+        "Message from: Marcos (+111)\n" +
+        'Chat: a group named "Jarvis Test"',
+    });
+  });
+
+  it("falls back to just the phone number when the sender's push name is unavailable", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: { agentName: "Jarvis", senderPhone: "111", isGroupChat: false },
+    });
+
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining("Message from: +111\n") as string,
+    });
+  });
+
+  it("says just 'a group' when the group has no known name", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: { agentName: "Jarvis", senderPhone: "111", isGroupChat: true },
+    });
+
+    const body = capture.body() as { system: string };
+    expect(body.system.split("\n")).toContain("Chat: a group");
+  });
+
+  it("includes the send timestamp as an ISO string when provided", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: {
+        agentName: "Jarvis",
+        senderPhone: "111",
+        isGroupChat: false,
+        timestamp: 1786019629,
+      },
+    });
+
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining("Sent at: 2026-08-06T12:33:49.000Z") as string,
+    });
+  });
+
+  it("includes the replied-to message's text when present", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: {
+        agentName: "Jarvis",
+        senderPhone: "111",
+        isGroupChat: false,
+        replyToText: "What time works for you?",
+      },
+    });
+
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining(
+        'Replying to an earlier message: "What time works for you?"',
+      ) as string,
+    });
+  });
+
+  it("omits the system field entirely when no context is given", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi");
+
+    const body = capture.body() as { system?: unknown };
+    expect(body.system).toBeUndefined();
+  });
+
+  it("includes a shared location when present", async () => {
+    const capture = captureSystem();
+    await routeMessage(deps, "111", "hi", {
+      context: {
+        agentName: "Jarvis",
+        senderPhone: "111",
+        isGroupChat: false,
+        locationText: "Our office (38.8937255, -77.0969763)",
+      },
+    });
+
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining(
+        "Shared location: Our office (38.8937255, -77.0969763)",
+      ) as string,
+    });
+  });
+
+  it("routes a bare /new with only a shared location to the agent instead of resetting", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
+        return Promise.resolve(
+          jsonResponse({ info: {}, parts: [{ type: "text", text: "got your location" }] }),
+        );
+      }),
+    );
+    deps.sessions.set("111", "ses_old");
+
+    const reply = await routeMessage(deps, "111", "/new", {
+      context: { agentName: "Jarvis", senderPhone: "111", isGroupChat: false, locationText: "1.5, 2.5" },
+    });
+
+    if (reply.kind !== "text") throw new Error("expected a text reply");
+    expect(reply.text).toBe("got your location");
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
 });

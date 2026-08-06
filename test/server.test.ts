@@ -38,6 +38,7 @@ function testConfig(): Config {
     opencodeAuthHeader: "",
     opencodeModelProvider: "",
     opencodeModelId: "",
+    agentName: "Jarvis",
     sessionsFile: "",
     maxBodyBytes: 64 * 1024,
     rateLimitMax: 20,
@@ -81,6 +82,7 @@ beforeEach(async () => {
     ensureBotIds: vi.fn().mockResolvedValue(undefined),
     resolvePhone: (jid) => jid?.split("@")[0],
     isBotId: () => false,
+    getGroupName: vi.fn().mockReturnValue(undefined),
   };
 
   deps = {
@@ -555,6 +557,103 @@ describe("server message handling", () => {
     expect(capturedBody).toMatchObject({ parts: [{ type: "text", text: "check this out" }] });
   });
 
+  function captureAgentSystem(finalReply = "ok"): { body: () => unknown } {
+    let capturedBody: unknown;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) {
+          return new Response(JSON.stringify({ id: "ses_1" }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        capturedBody = JSON.parse(await (input as Request).clone().text()) as unknown;
+        return new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: finalReply }] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    return { body: () => capturedBody };
+  }
+
+  it("passes the sender's push name and phone as agent context for a 1:1 message", async () => {
+    const capture = captureAgentSystem();
+    const body = messageBody({
+      body: "hi",
+      _data: { pushName: "Marcos Vinícius Rubido" },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining("Message from: Marcos Vinícius Rubido (+111)") as string,
+    });
+    const bodyObj = capture.body() as { system: string };
+    expect(bodyObj.system.split("\n")).toContain("Chat: a direct message (not a group)");
+  });
+
+  it("passes the group's name (via identity.getGroupName) as agent context for a group message", async () => {
+    (deps.identity.getGroupName as ReturnType<typeof vi.fn>).mockReturnValue("Jarvis Test");
+    identity.isBotId = (id) => id === "botid";
+    const capture = captureAgentSystem();
+
+    const body = messageBody({
+      from: "group@g.us",
+      participant: "111@c.us",
+      body: "@botid hello",
+      _data: {
+        message: { extendedTextMessage: { contextInfo: { mentionedJid: ["botid@lid"] } } },
+      },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.identity.getGroupName).toHaveBeenCalledWith("group@g.us");
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining('Chat: a group named "Jarvis Test"') as string,
+    });
+  });
+
+  it("includes the message timestamp and replied-to text when present", async () => {
+    const capture = captureAgentSystem();
+    const body = messageBody({
+      body: "hi",
+      timestamp: 1786019629,
+      replyTo: { body: "What time works for you?" },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    const bodyObj = capture.body() as { system: string };
+    expect(bodyObj.system).toContain("Sent at: 2026-08-06T12:33:49.000Z");
+    expect(bodyObj.system).toContain('Replying to an earlier message: "What time works for you?"');
+  });
+
+  it("uses config.agentName in the system context", async () => {
+    config.agentName = "Hal";
+    const capture = captureAgentSystem();
+    const body = messageBody({ body: "hi" });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining("You are Hal,") as string,
+    });
+  });
+
+  it("processes a location-only message (no text, no media) instead of dropping it", async () => {
+    const capture = captureAgentSystem("got your location");
+    const body = messageBody({
+      body: "",
+      location: { latitude: 38.8937255, longitude: -77.0969763, title: "Our office" },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(capture.body()).toMatchObject({
+      system: expect.stringContaining(
+        "Shared location: Our office (38.8937255, -77.0969763)",
+      ) as string,
+    });
+    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "got your location" }]);
+  });
+
   it("does not strip @-mention markup from a 1:1 message", async () => {
     vi.stubGlobal(
       "fetch",
@@ -573,7 +672,11 @@ describe("server message handling", () => {
     const body = messageBody({ body: "@someone check this out" });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sendSpy).toHaveBeenCalledWith("ses_1", "@someone check this out", undefined);
+    expect(sendSpy).toHaveBeenCalledWith(
+      "ses_1",
+      "@someone check this out",
+      expect.objectContaining({ media: undefined }) as unknown,
+    );
   });
 
   it("does not crash and logs on malformed JSON, after already responding 200", async () => {

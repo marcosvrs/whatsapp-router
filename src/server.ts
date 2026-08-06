@@ -7,8 +7,15 @@ import { resolveAllowedSender } from "./allowlist.js";
 import type { RateLimiter } from "./rateLimit.js";
 import type { IdentityResolver } from "./waha/identity.js";
 import type { WahaClientLike } from "./waha/client.js";
-import { messageDedupeKey, stripMentions, type WahaMessage, type WahaWebhookPayload } from "./waha/payload.js";
-import { routeMessage, type RouterDeps } from "./router.js";
+import {
+  extractPushName,
+  formatLocation,
+  messageDedupeKey,
+  stripMentions,
+  type WahaMessage,
+  type WahaWebhookPayload,
+} from "./waha/payload.js";
+import { routeMessage, type AgentContext, type RouterDeps } from "./router.js";
 import type { OpencodeMediaAttachment } from "./integrations/opencode.js";
 
 // WAHA reports hasMedia:true even when it couldn't fetch the file itself
@@ -50,7 +57,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       const isGroupMessage = (from ?? "").endsWith("@g.us");
       let text = msg.body ?? "";
       const mediaAvailable = hasDownloadableMedia(msg);
-      if (!text && !mediaAvailable) return;
+      if (!text && !mediaAvailable && !msg.location) return;
       if (deps.dedupe.alreadyProcessed(messageDedupeKey(msg))) return;
 
       const senderKey = await resolveAllowedSender(deps.identity, config.allowedUsers, from, msg);
@@ -90,7 +97,18 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
         }
       }
 
-      const reply = await routeMessage(deps.router, senderKey, text, media);
+      const context: AgentContext = {
+        agentName: config.agentName,
+        senderName: extractPushName(msg),
+        senderPhone: senderKey,
+        isGroupChat: isGroupMessage,
+        groupName: isGroupMessage ? deps.identity.getGroupName(from ?? "") : undefined,
+        timestamp: msg.timestamp,
+        replyToText: msg.replyTo?.body,
+        locationText: msg.location ? formatLocation(msg.location) : undefined,
+      };
+
+      const reply = await routeMessage(deps.router, senderKey, text, { media, context });
       if (reply.kind === "reaction") {
         await deps.waha.sendReaction(msg.id ?? "", reply.emoji);
         if (reply.text) await deps.waha.sendText(from ?? "", reply.text);

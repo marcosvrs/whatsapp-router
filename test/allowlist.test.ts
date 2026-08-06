@@ -9,6 +9,7 @@ function fakeIdentity(overrides: Partial<IdentityResolver> = {}): IdentityResolv
     ensureBotIds: vi.fn().mockResolvedValue(undefined),
     resolvePhone: (jid) => jid?.split("@")[0],
     isBotId: () => false,
+    getGroupName: () => undefined,
     ...overrides,
   };
 }
