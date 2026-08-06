@@ -81,8 +81,25 @@ added once their version has been out long enough to have surfaced any
 compromise (checked via `npm view <pkg> time`).
 
 **Git hooks** (`.githooks/`, native `core.hooksPath` — no dependency): `pre-commit`
-lints staged `.ts` files; `pre-push` scans the full commit history for secrets
-with [gitleaks](https://github.com/gitleaks/gitleaks) and runs typecheck + tests.
+lints staged `.ts` files. `pre-push` scans the full commit history for secrets
+with [gitleaks](https://github.com/gitleaks/gitleaks) (fast enough that scoping
+it wouldn't help, and it needs full history anyway to be meaningful), then
+typecheck + tests + mutation testing — scoped to changed code wherever that's
+actually safe:
+- **Typecheck** stays whole-program (a change to a shared type can break
+  correctness elsewhere without touching that file's text — TS checking is
+  inherently holistic), but `tsconfig.json` has `incremental: true` to cache
+  unchanged files' analysis instead.
+- **Tests**: `vitest run --changed origin/main` — only runs tests affected by
+  the diff (via import-graph analysis), not the full suite.
+- **Mutation testing**: `stryker run --incremental` — persists results
+  (`reports/stryker-incremental.json`, gitignored) and only re-mutates/re-tests
+  what could have changed status since the last run.
+
+CI (`npm run typecheck` / `lint` / `test:coverage` / `test:mutation`) always
+runs the full, unscoped versions — the hooks trade some rigor for speed on
+your own machine; CI is the actual safety net.
+
 Requires the one-time `git config` above (per clone — it's a local setting,
 not something a repo can force on a contributor).
 
