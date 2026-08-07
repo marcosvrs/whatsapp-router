@@ -2,8 +2,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { FireflyClient } from "../src/integrations/firefly.js";
-import { HaClient } from "../src/integrations/homeAssistant.js";
 import { OpencodeClient, type OpencodeMediaAttachment } from "../src/integrations/opencode.js";
 import { routeMessage, type RouterDeps } from "../src/router.js";
 import { SenderLock } from "../src/senderLock.js";
@@ -23,8 +21,6 @@ let deps: RouterDeps;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "whatsapp-router-router-test-"));
   deps = {
-    ha: new HaClient("http://ha.test", "token", "hook123"),
-    firefly: new FireflyClient("http://firefly.test", "token", "Checking"),
     opencode: new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "Basic abc", modelProvider: "", modelId: "" }),
     sessions: new SessionStore(join(dir, "sessions.json")),
     senderLock: new SenderLock(),
@@ -40,7 +36,7 @@ describe("routeMessage — /new", () => {
   it("resets the session and returns a confirmation when sent alone", async () => {
     deps.sessions.set("111", "ses_old");
     const reply = await routeMessage(deps, "111", "/new");
-    expect(reply).toEqual({ kind: "text", text: "Started a new conversation." });
+    expect(reply).toBe("Started a new conversation.");
     expect(deps.sessions.get("111")).toBeUndefined();
   });
 
@@ -61,57 +57,13 @@ describe("routeMessage — /new", () => {
   });
 });
 
-describe("routeMessage — ha: prefix", () => {
-  it("delegates to the HA client with the prefix stripped", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
-    const reply = await routeMessage(deps, "111", "ha: turn on lights");
-    expect(reply).toEqual({ kind: "reaction", emoji: "✅" });
-  });
-
-  it("reacts with ❌ and includes the failure text when the webhook call fails", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 500 })));
-    const reply = await routeMessage(deps, "111", "ha: turn on lights");
-    expect(reply).toEqual({ kind: "reaction", emoji: "❌", text: "HA webhook failed (500)." });
-  });
-});
-
-describe("routeMessage — money: prefix", () => {
-  it("delegates to the Firefly client with the prefix stripped", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((input: unknown) => {
-        const url = requestUrl(input);
-        if (url.includes("/accounts")) {
-          return Promise.resolve(
-            jsonResponse({ data: [{ id: "42", attributes: { name: "Checking" } }] }),
-          );
-        }
-        return Promise.resolve(new Response(null, { status: 200 }));
-      }),
-    );
-    const reply = await routeMessage(deps, "111", "money: 20 groceries");
-    expect(reply).toEqual({ kind: "reaction", emoji: "✅" });
-  });
-
-  it("reacts with ❌ and includes the failure text when the format is invalid", async () => {
-    const reply = await routeMessage(deps, "111", "money: groceries");
-    expect(reply).toEqual({
-      kind: "reaction",
-      emoji: "❌",
-      text: 'Format: "money: <amount> <description>", e.g. "money: 20 groceries"',
-    });
-  });
-});
-
 async function agentText(
   deps: RouterDeps,
   senderKey: string,
   text: string,
   media?: OpencodeMediaAttachment,
 ): Promise<string> {
-  const reply = await routeMessage(deps, senderKey, text, media ? { media: [media] } : {});
-  if (reply.kind !== "text") throw new Error(`expected a text reply, got ${reply.kind}`);
-  return reply.text;
+  return routeMessage(deps, senderKey, text, media ? { media: [media] } : {});
 }
 
 describe("routeMessage — default (agent)", () => {
@@ -205,10 +157,17 @@ describe("routeMessage — default (agent)", () => {
     expect(reply).toBe("Agent call failed — check whatsapp-router logs.");
   });
 
-  it("is case-insensitive and trims surrounding whitespace for every prefix", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
-    const reply = await routeMessage(deps, "111", "  HA:  turn on lights  ");
-    expect(reply).toEqual({ kind: "reaction", emoji: "✅" });
+  it("is case-insensitive and trims surrounding whitespace before forwarding to the agent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "handled" }] }));
+      }),
+    );
+    const reply = await routeMessage(deps, "111", "  hello there  ");
+    expect(reply).toBe("handled");
   });
 
   it("treats a bare '/new' prefix (e.g. '/newfoo') as agent text, not the reset command", async () => {
@@ -271,7 +230,7 @@ describe("routeMessage — /new with media", () => {
   it("treats an empty media array the same as no media at all (bare '/new' resets, no agent call)", async () => {
     deps.sessions.set("111", "ses_old");
     const reply = await routeMessage(deps, "111", "/new", { media: [] });
-    expect(reply).toEqual({ kind: "text", text: "Started a new conversation." });
+    expect(reply).toBe("Started a new conversation.");
   });
 
   it("forwards to the agent (instead of the plain reset confirmation) when media is attached without trailing text", async () => {
@@ -318,8 +277,7 @@ describe("routeMessage — agent context", () => {
       },
     });
 
-    if (reply.kind !== "text") throw new Error("expected a text reply");
-    expect(reply.text).toBe("ok");
+    expect(reply).toBe("ok");
     expect(capture.body()).toMatchObject({
       system:
         "You are being reached over WhatsApp.\n" +
@@ -467,8 +425,7 @@ describe("routeMessage — agent context", () => {
       context: { senderPhone: "111", isGroupChat: false, locationText: "1.5, 2.5" },
     });
 
-    if (reply.kind !== "text") throw new Error("expected a text reply");
-    expect(reply.text).toBe("got your location");
+    expect(reply).toBe("got your location");
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
 });

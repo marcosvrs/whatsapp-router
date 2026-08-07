@@ -23,12 +23,6 @@ describe("loadConfig", () => {
       wahaApiKey: "waha-key",
       wahaSession: "default",
       webhookSecret: "webhook-secret",
-      hassBaseUrl: "http://host.docker.internal:8123",
-      hassToken: "",
-      haWebhookId: "",
-      fireflyBaseUrl: "http://firefly:8080",
-      fireflyPat: "",
-      fireflyDefaultSourceAccount: "",
       opencodeBaseUrl: "http://opencode:4096",
       opencodeAuthHeader: "",
       opencodeModelProvider: "",
@@ -46,12 +40,6 @@ describe("loadConfig", () => {
         PORT: "9090",
         WAHA_BASE_URL: "http://waha-override:3000",
         WAHA_SESSION: "override-session",
-        HASS_BASE_URL: "http://ha-override:8123",
-        HASS_TOKEN: "ha-token",
-        HA_WEBHOOK_ID: "hook-id",
-        FIII_BASE_URL: "http://firefly-override:8080",
-        FIII_PAT: "firefly-pat",
-        FIII_DEFAULT_SOURCE_ACCOUNT: "Checking",
         OPENCODE_BASE_URL: "http://opencode-override:4096",
         OPENCODE_MODEL_PROVIDER: "openai",
         OPENCODE_MODEL_ID: "gpt-5.6-luna",
@@ -61,12 +49,6 @@ describe("loadConfig", () => {
     expect(config.port).toBe(9090);
     expect(config.wahaBaseUrl).toBe("http://waha-override:3000");
     expect(config.wahaSession).toBe("override-session");
-    expect(config.hassBaseUrl).toBe("http://ha-override:8123");
-    expect(config.hassToken).toBe("ha-token");
-    expect(config.haWebhookId).toBe("hook-id");
-    expect(config.fireflyBaseUrl).toBe("http://firefly-override:8080");
-    expect(config.fireflyPat).toBe("firefly-pat");
-    expect(config.fireflyDefaultSourceAccount).toBe("Checking");
     expect(config.opencodeBaseUrl).toBe("http://opencode-override:4096");
     expect(config.opencodeModelProvider).toBe("openai");
     expect(config.opencodeModelId).toBe("gpt-5.6-luna");

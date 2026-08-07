@@ -7,8 +7,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../src/config.js";
 import { MessageDedupe } from "../src/dedupe.js";
-import { FireflyClient } from "../src/integrations/firefly.js";
-import { HaClient } from "../src/integrations/homeAssistant.js";
 import { OpencodeClient } from "../src/integrations/opencode.js";
 import { RateLimiter } from "../src/rateLimit.js";
 import { SenderLock } from "../src/senderLock.js";
@@ -29,12 +27,6 @@ function testConfig(): Config {
     wahaApiKey: "key",
     wahaSession: "test",
     webhookSecret: SECRET,
-    hassBaseUrl: "http://ha.test",
-    hassToken: "",
-    haWebhookId: "",
-    fireflyBaseUrl: "http://firefly.test",
-    fireflyPat: "",
-    fireflyDefaultSourceAccount: "",
     opencodeBaseUrl: "http://opencode.test",
     opencodeAuthHeader: "",
     opencodeModelProvider: "",
@@ -101,12 +93,6 @@ beforeEach(async () => {
     rateLimiter: new RateLimiter(config.rateLimitMax, config.rateLimitWindowMs),
     dedupe: new MessageDedupe(5 * 60 * 1000),
     router: {
-      ha: new HaClient(config.hassBaseUrl, config.hassToken, config.haWebhookId),
-      firefly: new FireflyClient(
-        config.fireflyBaseUrl,
-        config.fireflyPat,
-        config.fireflyDefaultSourceAccount,
-      ),
       opencode: new OpencodeClient({ baseUrl: config.opencodeBaseUrl, authHeader: "Basic abc", modelProvider: "", modelId: "" }),
       sessions: new SessionStore(config.sessionsFile),
       senderLock: new SenderLock(),
@@ -409,27 +395,6 @@ describe("server message handling", () => {
     expect(deps.waha.sendReaction).not.toHaveBeenCalled();
   });
 
-  it("reacts with an emoji for a successful ha: command instead of sending text", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 200 })));
-    deps.router.ha = new HaClient("http://ha.test", "token", "hook123");
-
-    const body = messageBody({ body: "ha: turn on lights" });
-    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
-
-    expect(deps.waha.sendReaction).toHaveBeenCalledWith("m1", "✅");
-    expect(deps.waha.sendText).not.toHaveBeenCalled();
-  });
-
-  it("reacts with ❌ and also sends the failure text when ha: isn't configured", async () => {
-    const body = messageBody({ body: "ha: turn on lights" });
-    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
-
-    expect(deps.waha.sendReaction).toHaveBeenCalledWith("m1", "❌");
-    expect(sentMessages).toEqual([
-      { chatId: "111@c.us", text: "Home Assistant webhook not configured yet." },
-    ]);
-  });
-
   it("shows a typing indicator and sends the agent's reply directly, with no placeholder", async () => {
     vi.stubGlobal(
       "fetch",
@@ -712,30 +677,6 @@ describe("server message handling", () => {
       expect(deps.waha.fetchRecentMessages).not.toHaveBeenCalled();
       const system = (capture.body() as { system: string }).system;
       expect(system).not.toContain("Recent messages");
-    });
-
-    it("does not fetch recent history for a ha: group command (never used by those routes)", async () => {
-      identity.isBotId = (id) => id === "botid";
-      const body = groupMentionBody({ body: "@botid ha: turn on lights" });
-      await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
-
-      expect(deps.waha.fetchRecentMessages).not.toHaveBeenCalled();
-    });
-
-    it("does not fetch recent history for a money: group command either", async () => {
-      identity.isBotId = (id) => id === "botid";
-      const body = groupMentionBody({ body: "@botid money: 20 groceries" });
-      await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
-
-      expect(deps.waha.fetchRecentMessages).not.toHaveBeenCalled();
-    });
-
-    it("does fetch recent history when 'ha:'/'money:' appear mid-message rather than as the prefix", async () => {
-      identity.isBotId = (id) => id === "botid";
-      const body = groupMentionBody({ body: "@botid what does ha: mean anyway" });
-      await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
-
-      expect(deps.waha.fetchRecentMessages).toHaveBeenCalledWith("group@g.us", RECENT_MESSAGES_FETCH_LIMIT);
     });
 
     it("forwards up to 2 recent media items from group history as attachments, with mimetype/filename intact", async () => {

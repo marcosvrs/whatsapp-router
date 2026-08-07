@@ -69,7 +69,7 @@ jobs:
             type=raw,value=latest,enable=${{ steps.vars.outputs.branch_name == 'main' }}
           labels: |
             org.opencontainers.image.title=WhatsApp Router
-            org.opencontainers.image.description=Routes WhatsApp messages (via WAHA) to an AI coding agent, a budgeting app, and a home automation webhook.
+            org.opencontainers.image.description=Bridges WhatsApp (via WAHA) to a persistent opencode AI agent session per sender.
 
       - name: Build Docker image
         id: build

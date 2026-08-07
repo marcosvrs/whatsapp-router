@@ -1,7 +1,5 @@
 import { loadConfig } from "./config.js";
 import { MessageDedupe } from "./dedupe.js";
-import { FireflyClient } from "./integrations/firefly.js";
-import { HaClient } from "./integrations/homeAssistant.js";
 import { OpencodeClient } from "./integrations/opencode.js";
 import { log } from "./log.js";
 import { RateLimiter } from "./rateLimit.js";
@@ -22,12 +20,6 @@ const deps: ServerDeps = {
   rateLimiter: new RateLimiter(config.rateLimitMax, config.rateLimitWindowMs),
   dedupe: new MessageDedupe(5 * 60 * 1000),
   router: {
-    ha: new HaClient(config.hassBaseUrl, config.hassToken, config.haWebhookId),
-    firefly: new FireflyClient(
-      config.fireflyBaseUrl,
-      config.fireflyPat,
-      config.fireflyDefaultSourceAccount,
-    ),
     opencode: new OpencodeClient({
       baseUrl: config.opencodeBaseUrl,
       authHeader: config.opencodeAuthHeader,

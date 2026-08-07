@@ -8,14 +8,6 @@ export interface Config {
 
   webhookSecret: string;
 
-  hassBaseUrl: string;
-  hassToken: string;
-  haWebhookId: string;
-
-  fireflyBaseUrl: string;
-  fireflyPat: string;
-  fireflyDefaultSourceAccount: string;
-
   opencodeBaseUrl: string;
   opencodeAuthHeader: string;
   opencodeModelProvider: string;
@@ -55,14 +47,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     wahaSession: env.WAHA_SESSION ?? "default",
 
     webhookSecret: requireEnv(env, "WEBHOOK_SECRET"),
-
-    hassBaseUrl: env.HASS_BASE_URL ?? "http://host.docker.internal:8123",
-    hassToken: env.HASS_TOKEN ?? "",
-    haWebhookId: env.HA_WEBHOOK_ID ?? "",
-
-    fireflyBaseUrl: env.FIII_BASE_URL ?? "http://firefly:8080",
-    fireflyPat: env.FIII_PAT ?? "",
-    fireflyDefaultSourceAccount: env.FIII_DEFAULT_SOURCE_ACCOUNT ?? "",
 
     opencodeBaseUrl: env.OPENCODE_BASE_URL ?? "http://opencode:4096",
     opencodeAuthHeader,

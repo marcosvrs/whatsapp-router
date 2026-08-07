@@ -1,22 +1,8 @@
-import type { ActionResult } from "./actionResult.js";
-import type { FireflyClient } from "./integrations/firefly.js";
-import type { HaClient } from "./integrations/homeAssistant.js";
 import type { OpencodeClient, OpencodeMediaAttachment } from "./integrations/opencode.js";
 import { log } from "./log.js";
 import { markdownToWhatsapp } from "./markdownToWhatsapp.js";
 import type { SenderLock } from "./senderLock.js";
 import type { SessionStore } from "./sessionStore.js";
-
-// "text" replies go through waha.sendText; "reaction" replies react to the
-// original message instead — text is only attached to a reaction on failure,
-// so the sender knows what went wrong without a reply cluttering the chat.
-export type RouteReply = { kind: "text"; text: string } | { kind: "reaction"; emoji: string; text?: string };
-
-function actionReply(result: ActionResult): RouteReply {
-  return result.ok
-    ? { kind: "reaction", emoji: "✅" }
-    : { kind: "reaction", emoji: "❌", text: result.text };
-}
 
 // Everything server.ts can tell the agent about who/where/how it's being
 // reached, kept separate from the WhatsApp-domain-agnostic OpencodeClient —
@@ -68,14 +54,12 @@ function formatSystemContext(context: AgentContext): string {
   return lines.join("\n");
 }
 
-// Concrete classes, not interfaces (unlike ServerDeps in server.ts): tests
-// construct real HaClient/FireflyClient/OpencodeClient instances and stub
-// their one dependency (global fetch) instead, since these classes have no
-// state worth faking and TS structural typing can't match a class type
-// against a hand-rolled fake with private fields.
+// A concrete class, not an interface (unlike ServerDeps in server.ts): tests
+// construct a real OpencodeClient instance and stub its one dependency
+// (global fetch) instead, since it has no state worth faking and TS
+// structural typing can't match a class type against a hand-rolled fake
+// with private fields.
 export interface RouterDeps {
-  ha: HaClient;
-  firefly: FireflyClient;
   opencode: OpencodeClient;
   sessions: SessionStore;
   senderLock: SenderLock;
@@ -114,19 +98,19 @@ async function handleAgent(
   }
 }
 
-// "/new" resets the sender's session; "ha:"/"money:" dispatch to their
-// integration; anything else falls through to the agent. Attached media
-// (the triggering message's own attachment, plus — for group messages —
-// any recent-history media forwarded alongside it; any route except /new
-// and the fallback ignores it, ha:/money: aren't media-aware) rides along
-// to the agent as file parts, and context (who/where/how) rides along as
-// the SDK's separate `system` field.
+// "/new" resets the sender's session; anything else falls through to the
+// agent (which is now the only route — Home Assistant and Firefly control
+// happen through opencode's own tools/MCP servers instead of dedicated
+// prefixes here). Attached media (the triggering message's own attachment,
+// plus — for group messages — any recent-history media forwarded alongside
+// it) rides along to the agent as file parts, and context (who/where/how)
+// rides along as the SDK's separate `system` field.
 export async function routeMessage(
   deps: RouterDeps,
   senderKey: string,
   text: string,
   extras: RouteExtras = {},
-): Promise<RouteReply> {
+): Promise<string> {
   const trimmed = text.trim();
 
   const newMatch = /^\/new\b(.*)$/i.exec(trimmed);
@@ -134,16 +118,10 @@ export async function routeMessage(
     deps.sessions.reset(senderKey);
     const rest = (newMatch[1] ?? "").trim();
     if (!rest && !hasMedia(extras) && !extras.context?.locationText) {
-      return { kind: "text", text: "Started a new conversation." };
+      return "Started a new conversation.";
     }
-    return { kind: "text", text: await handleAgent(deps, senderKey, rest, extras) };
+    return handleAgent(deps, senderKey, rest, extras);
   }
 
-  const haMatch = /^ha:(.*)$/i.exec(trimmed);
-  if (haMatch) return actionReply(await deps.ha.trigger((haMatch[1] ?? "").trim()));
-
-  const moneyMatch = /^money:(.*)$/i.exec(trimmed);
-  if (moneyMatch) return actionReply(await deps.firefly.logTransaction((moneyMatch[1] ?? "").trim()));
-
-  return { kind: "text", text: await handleAgent(deps, senderKey, trimmed, extras) };
+  return handleAgent(deps, senderKey, trimmed, extras);
 }

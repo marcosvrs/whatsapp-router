@@ -1,29 +1,28 @@
 # whatsapp-router
 
-Routes WhatsApp messages — received via a self-hosted [WAHA](https://waha.devlike.pro/)
-(WhatsApp HTTP API) instance — to one of three integrations, based on a text
-prefix:
+Bridges WhatsApp — received via a self-hosted [WAHA](https://waha.devlike.pro/)
+(WhatsApp HTTP API) instance — to an [opencode](https://opencode.ai/) AI agent
+session, one per sender:
 
 | Message | Routed to |
 |---|---|
 | `/new [message]` | Resets the sender's conversation with the agent, optionally starting a new one immediately |
-| `ha: <text>` | A configured [Home Assistant](https://www.home-assistant.io/) webhook — reacts ✅/❌ on the original message instead of replying with text |
-| `money: <amount> <description>` | A [Firefly III](https://www.firefly-iii.org/) withdrawal transaction — reacts ✅/❌ on the original message instead of replying with text |
-| anything else | An [opencode](https://opencode.ai/) agent session (one persistent session per sender, identifies itself as "Sisyphus" — see below) — WhatsApp's own typing indicator shows while it's working, then the real reply is sent once, no placeholder |
+| anything else | The opencode agent session (identifies itself as "Sisyphus" — see below) — WhatsApp's own typing indicator shows while it's working, then the real reply is sent once, no placeholder |
 
-A failed `ha:`/`money:` reaction (❌) is followed by a text reply explaining
-what went wrong, so the sender knows why without cluttering the chat on the
-success path. Every inbound message also gets a WhatsApp read receipt, and a
-typing indicator shows while the agent is working.
+Home Assistant and Firefly III control both live inside opencode itself now
+(via its own tools/MCP servers), not as prefix routes here — this service's
+only job is getting the message to the agent and the reply back to WhatsApp.
+
+Every inbound message gets a WhatsApp read receipt, and a typing indicator
+shows while the agent is working.
 
 Works in a 1:1 chat with the bot, or in any group it's added to — as long as
 the sender is allowlisted and @-mentions the bot. Images and documents are
 downloaded and forwarded to the opencode agent as an attachment (alongside
 any caption text as the message); a shared location is described in words
-instead (no attachment to forward); `ha:`/`money:` aren't media-aware, so an
-attachment or location on one of those is simply ignored. WhatsApp contact
-cards (vCards) aren't handled — parsing them into something worth passing to
-the agent was judged not worth the complexity for now.
+instead (no attachment to forward). WhatsApp contact cards (vCards) aren't
+handled — parsing them into something worth passing to the agent was judged
+not worth the complexity for now.
 
 The agent gets more than just the message text: every call includes a
 `system` context (kept separate from the SDK's own agent system prompt, and
@@ -47,8 +46,7 @@ missing everything anyone else in the group said. Bounded by both a message
 count and a character budget, and trimmed to stop at (not including) the
 previous time the bot was mentioned, so nothing already answered gets resent.
 Up to two of the most recent images/documents in that window are forwarded
-as real attachments, not just described in text; `ha:`/`money:` commands skip
-this fetch entirely since they can't use it anyway.
+as real attachments, not just described in text.
 
 The agent's reply comes back as standard Markdown, but WhatsApp renders its
 own smaller formatting syntax (single `*bold*`, `_italic_`, `~strike~`,
@@ -58,14 +56,13 @@ see `markdownToWhatsapp.ts`.
 ## Why this exists
 
 WAHA is purely a WhatsApp transport layer (send/receive, sessions, media) —
-it has no concept of routing a message to an arbitrary set of internal APIs,
-maintaining a conversation per sender, or an allowlist. This service is that
-glue, kept intentionally small: a single Node HTTP server, no web framework,
-plain constructor-injected classes per integration. The only production
-dependency is [`@opencode-ai/sdk`](https://www.npmjs.com/package/@opencode-ai/sdk),
-the official client for the opencode agent — every other integration
-(WAHA, Home Assistant, Firefly III) talks to its REST API directly via
-native `fetch`.
+it has no concept of maintaining a conversation per sender or an allowlist,
+and opencode has no concept of WhatsApp. This service is the glue between
+them, kept intentionally small: a single Node HTTP server, no web framework.
+The only production dependency is
+[`@opencode-ai/sdk`](https://www.npmjs.com/package/@opencode-ai/sdk), the
+official client for the opencode agent — WAHA's own REST API is called
+directly via native `fetch`.
 
 ## Requirements
 
@@ -75,10 +72,9 @@ native `fetch`.
 ## Setup
 
 1. Copy `.env.example` to `.env` and fill in the required values (`WAHA_API_KEY`,
-   `WEBHOOK_SECRET`, `WHATSAPP_ALLOWED_USERS`). The Home Assistant / Firefly III /
-   opencode sections are each independently optional — leave a section's vars
-   empty and that prefix replies with a "not configured yet" message instead of
-   erroring.
+   `WEBHOOK_SECRET`, `WHATSAPP_ALLOWED_USERS`). The opencode section is
+   optional — leave it empty and the agent replies with a "not configured
+   yet" message instead of erroring.
 
 2. Point WAHA's session webhook at this service, signed with the same secret:
 
@@ -154,8 +150,6 @@ not something a repo can force on a contributor).
 src/
   config.ts              env var loading
   security.ts             webhook HMAC verification
-  amount.ts                "20,50" / "1,234.56" / "1.234,56" amount parsing
-  actionResult.ts           { ok, text } shape shared by ha:/money: integrations
   rateLimit.ts, dedupe.ts, senderLock.ts, sessionStore.ts
   waha/
     client.ts              WAHA REST API wrapper — send/react/edit/typing/read-receipts/media/
@@ -166,14 +160,13 @@ src/
     identity.ts              @lid <-> phone resolution, bot's own id, group names
                             (for mention detection and agent context)
   integrations/
-    firefly.ts, homeAssistant.ts   plain fetch, return ActionResult
-    opencode.ts                     wraps @opencode-ai/sdk; send() takes optional
-                                    media (array) + a system-context string
+    opencode.ts             wraps @opencode-ai/sdk; send() takes optional
+                            media (array) + a system-context string
   allowlist.ts             who's allowed to trigger the bot, and from where
   markdownToWhatsapp.ts    converts the agent's Markdown reply to WhatsApp's
                             own formatting syntax
-  router.ts                 prefix -> integration dispatch; returns a RouteReply
-                            (text / reaction); builds the agent's system context
+  router.ts                 "/new" vs. everything else -> the agent; returns the
+                            reply text directly; builds the agent's system context
                             from an AgentContext (who/where/when/recent group history);
                             converts the agent's reply via markdownToWhatsapp before returning it
   server.ts                 HTTP wiring: auth, size limits, dedupe, rate limit,
@@ -184,7 +177,7 @@ src/
 
 Each class takes its dependencies as constructor arguments — no DI framework,
 no global state — which is what makes the whole thing unit-testable without
-a running WAHA/opencode/Firefly/Home Assistant instance in the loop.
+a running WAHA or opencode instance in the loop.
 
 ## Known limitations
 

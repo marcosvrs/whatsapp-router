@@ -23,14 +23,6 @@ import {
 import { routeMessage, type AgentContext, type RouterDeps } from "./router.js";
 import type { OpencodeMediaAttachment } from "./integrations/opencode.js";
 
-// ha:/money: ignore context/media entirely (see router.ts) — skip the recent-
-// history fetch (a real WAHA round-trip plus up to RECENT_MEDIA_MAX downloads)
-// for those so it's never wasted on a route that can't use it.
-function skipsAgentContext(text: string): boolean {
-  const trimmed = text.trim();
-  return /^ha:/i.test(trimmed) || /^money:/i.test(trimmed);
-}
-
 export interface ServerDeps {
   waha: WahaClientLike;
   identity: IdentityResolver;
@@ -107,11 +99,10 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       // context for messages that arrive without full conversation history of
       // their own (each opencode session is per-sender, so a session only
       // ever sees what its own sender typed — not what other participants
-      // said). Real I/O that only groups need, so 1:1 and ha:/money: (which
-      // ignore context/media anyway) skip it; wrapped so a WAHA hiccup here
-      // costs the enrichment, not the whole reply.
+      // said). Real I/O that only groups need, so 1:1 skips it; wrapped so a
+      // WAHA hiccup here costs the enrichment, not the whole reply.
       let recentMessages: string | undefined;
-      if (isGroupMessage && !skipsAgentContext(text)) {
+      if (isGroupMessage) {
         try {
           const history = await deps.waha.fetchRecentMessages(from ?? "", RECENT_MESSAGES_FETCH_LIMIT);
           // trimSinceLastMention already excludes the triggering message by id —
@@ -149,12 +140,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
         media: media.length ? media : undefined,
         context,
       });
-      if (reply.kind === "reaction") {
-        await deps.waha.sendReaction(msg.id ?? "", reply.emoji);
-        if (reply.text) await deps.waha.sendText(from ?? "", reply.text);
-      } else {
-        await deps.waha.sendText(from ?? "", reply.text);
-      }
+      await deps.waha.sendText(from ?? "", reply);
     } catch (err) {
       log("webhook handling error", err instanceof Error ? err.message : String(err));
     }
