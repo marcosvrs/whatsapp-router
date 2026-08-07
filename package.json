@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-router",
   "version": "1.0.0",
-  "description": "Routes WhatsApp messages (via WAHA) to an AI coding agent, a budgeting app, and a home automation webhook.",
+  "description": "Bridges WhatsApp (via WAHA) to a persistent opencode AI agent session per sender.",
   "type": "module",
   "license": "MIT",
   "engines": {
