@@ -14,6 +14,7 @@ import { SessionStore } from "../src/sessionStore.js";
 import { buildServer, type ServerDeps } from "../src/server.js";
 import type { IdentityResolver } from "../src/waha/identity.js";
 import type { WahaClientLike } from "../src/waha/client.js";
+import { TypingPresence } from "../src/waha/typingKeepAlive.js";
 import { RECENT_MESSAGES_FETCH_LIMIT, type WahaHistoryMessage } from "../src/waha/payload.js";
 import { requestUrl } from "./testUtils.js";
 
@@ -70,6 +71,7 @@ beforeEach(async () => {
       return Promise.resolve();
     }),
     startTyping: vi.fn().mockResolvedValue(undefined),
+    stopTyping: vi.fn().mockResolvedValue(undefined),
     markChatRead: vi.fn().mockResolvedValue(undefined),
     sendReaction: vi.fn().mockResolvedValue(undefined),
     editMessage: vi.fn().mockResolvedValue(undefined),
@@ -96,6 +98,7 @@ beforeEach(async () => {
       opencode: new OpencodeClient({ baseUrl: config.opencodeBaseUrl, authHeader: "Basic abc", modelProvider: "", modelId: "" }),
       sessions: new SessionStore(config.sessionsFile),
       senderLock: new SenderLock(),
+      typing: new TypingPresence(waha),
     },
   };
 

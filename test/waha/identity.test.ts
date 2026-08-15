@@ -6,6 +6,7 @@ function fakeWaha(overrides: Partial<WahaClientLike> = {}): WahaClientLike {
   return {
     sendText: vi.fn().mockResolvedValue(undefined),
     startTyping: vi.fn().mockResolvedValue(undefined),
+    stopTyping: vi.fn().mockResolvedValue(undefined),
     markChatRead: vi.fn().mockResolvedValue(undefined),
     sendReaction: vi.fn().mockResolvedValue(undefined),
     editMessage: vi.fn().mockResolvedValue(undefined),

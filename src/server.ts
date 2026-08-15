@@ -81,7 +81,6 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       }
 
       log("inbound", from, JSON.stringify(text).slice(0, 200));
-      await deps.waha.startTyping(from ?? "");
 
       const media: OpencodeMediaAttachment[] = [];
       if (mediaAvailable && msg.media?.url) {
@@ -136,11 +135,11 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
         recentMessages,
       };
 
-      const reply = await routeMessage(deps.router, senderKey, text, {
+      const reply = await routeMessage(deps.router, senderKey, from ?? "", text, {
         media: media.length ? media : undefined,
         context,
       });
-      await deps.waha.sendText(from ?? "", reply);
+      if (reply) await deps.waha.sendText(from ?? "", reply);
     } catch (err) {
       log("webhook handling error", err instanceof Error ? err.message : String(err));
     }

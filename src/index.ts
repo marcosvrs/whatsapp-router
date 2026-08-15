@@ -8,6 +8,7 @@ import { SessionStore } from "./sessionStore.js";
 import { buildServer, type ServerDeps } from "./server.js";
 import { WahaClient } from "./waha/client.js";
 import { Identity } from "./waha/identity.js";
+import { TypingPresence } from "./waha/typingKeepAlive.js";
 
 const config = loadConfig();
 
@@ -28,6 +29,7 @@ const deps: ServerDeps = {
     }),
     sessions: new SessionStore(config.sessionsFile),
     senderLock: new SenderLock(),
+    typing: new TypingPresence(waha),
   },
 };
 

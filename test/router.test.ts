@@ -6,7 +6,11 @@ import { OpencodeClient, type OpencodeMediaAttachment } from "../src/integration
 import { routeMessage, type RouterDeps } from "../src/router.js";
 import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
+import type { WahaClientLike } from "../src/waha/client.js";
+import { TypingPresence } from "../src/waha/typingKeepAlive.js";
 import { requestUrl } from "./testUtils.js";
+
+const CHAT_ID = "chat1";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -15,15 +19,39 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function sseResponse(events: unknown[]): Response {
+  const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
 let dir: string;
 let deps: RouterDeps;
+let sentMessages: { chatId: string; text: string }[];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "whatsapp-router-router-test-"));
+  const messages: { chatId: string; text: string }[] = [];
+  sentMessages = messages;
+  const waha: WahaClientLike = {
+    sendText: vi.fn().mockImplementation((chatId: string, text: string) => {
+      messages.push({ chatId, text });
+      return Promise.resolve();
+    }),
+    startTyping: vi.fn().mockResolvedValue(undefined),
+    stopTyping: vi.fn().mockResolvedValue(undefined),
+    markChatRead: vi.fn().mockResolvedValue(undefined),
+    sendReaction: vi.fn().mockResolvedValue(undefined),
+    editMessage: vi.fn().mockResolvedValue(undefined),
+    fetchGroups: vi.fn().mockResolvedValue({}),
+    fetchSessionInfo: vi.fn().mockResolvedValue(null),
+    downloadMedia: vi.fn().mockResolvedValue(null),
+    fetchRecentMessages: vi.fn().mockResolvedValue([]),
+  };
   deps = {
     opencode: new OpencodeClient({ baseUrl: "http://opencode.test", authHeader: "Basic abc", modelProvider: "", modelId: "" }),
     sessions: new SessionStore(join(dir, "sessions.json")),
     senderLock: new SenderLock(),
+    typing: new TypingPresence(waha),
   };
 });
 
@@ -32,10 +60,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function lastSentText(): string | undefined {
+  return sentMessages.at(-1)?.text;
+}
+
 describe("routeMessage — /new", () => {
   it("resets the session and returns a confirmation when sent alone", async () => {
     deps.sessions.set("111", "ses_old");
-    const reply = await routeMessage(deps, "111", "/new");
+    const reply = await routeMessage(deps, "111", CHAT_ID, "/new");
     expect(reply).toBe("Started a new conversation.");
     expect(deps.sessions.get("111")).toBeUndefined();
   });
@@ -47,23 +79,29 @@ describe("routeMessage — /new", () => {
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "hi again" }] }));
       }),
     );
 
-    const reply = await agentText(deps, "111", "/new hello");
-    expect(reply).toBe("hi again");
+    await agentText(deps, "111", "/new hello");
+    expect(lastSentText()).toBe("hi again");
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
 });
 
+// Drives the agent path and returns the last message sent to WhatsApp — the
+// agent path no longer returns text directly (it can deliver more than one
+// message over time via streaming), so tests observe delivery the same way
+// server.ts would: via waha.sendText.
 async function agentText(
   deps: RouterDeps,
   senderKey: string,
   text: string,
   media?: OpencodeMediaAttachment,
-): Promise<string> {
-  return routeMessage(deps, senderKey, text, media ? { media: [media] } : {});
+): Promise<string | undefined> {
+  await routeMessage(deps, senderKey, CHAT_ID, text, media ? { media: [media] } : {});
+  return lastSentText();
 }
 
 describe("routeMessage — default (agent)", () => {
@@ -73,6 +111,7 @@ describe("routeMessage — default (agent)", () => {
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "hello!" }] }));
       }),
     );
@@ -82,12 +121,46 @@ describe("routeMessage — default (agent)", () => {
     expect(deps.sessions.get("111")).toBe("ses_1");
   });
 
+  it("does not double-deliver when the SSE watch reports the same turn send() already returned", async () => {
+    // Reproduces a real live-verification finding: watchSession is started
+    // before send(), so both can observe the exact same completed turn —
+    // delivery must dedupe by message id, not send twice.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        if (url.endsWith("/event")) {
+          return Promise.resolve(
+            sseResponse([
+              {
+                type: "message.part.updated",
+                properties: {
+                  part: { id: "prt_1", messageID: "msg_1", sessionID: "ses_1", type: "text", text: "hello!" },
+                },
+              },
+              {
+                type: "message.updated",
+                properties: { info: { id: "msg_1", sessionID: "ses_1", role: "assistant", finish: "stop" } },
+              },
+            ]),
+          );
+        }
+        return Promise.resolve(jsonResponse({ info: { id: "msg_1" }, parts: [{ type: "text", text: "hello!" }] }));
+      }),
+    );
+
+    await agentText(deps, "111", "hi there");
+    expect(sentMessages.filter((m) => m.text === "hello!")).toHaveLength(1);
+  });
+
   it("converts the agent's Markdown reply to WhatsApp formatting before returning it", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(
           jsonResponse({ info: {}, parts: [{ type: "text", text: "This is **bold** and *italic*." }] }),
         );
@@ -100,9 +173,11 @@ describe("routeMessage — default (agent)", () => {
 
   it("reuses an existing session instead of creating a new one", async () => {
     deps.sessions.set("111", "ses_existing");
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] }));
+    const fetchMock = vi.fn().mockImplementation((input: unknown) => {
+      const url = requestUrl(input);
+      if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
+      return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] }));
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     await agentText(deps, "111", "hi again");
@@ -124,7 +199,11 @@ describe("routeMessage — default (agent)", () => {
     const setSpy = vi.spyOn(deps.sessions, "set");
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] })),
+      vi.fn().mockImplementation((input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
+        return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] }));
+      }),
     );
 
     await agentText(deps, "111", "hi again");
@@ -141,6 +220,7 @@ describe("routeMessage — default (agent)", () => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
         if (url.includes("/session/ses_stale/")) return Promise.resolve(jsonResponse({}, 404));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "ok" }] }));
       }),
     );
@@ -163,10 +243,11 @@ describe("routeMessage — default (agent)", () => {
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "handled" }] }));
       }),
     );
-    const reply = await routeMessage(deps, "111", "  hello there  ");
+    const reply = await agentText(deps, "111", "  hello there  ");
     expect(reply).toBe("handled");
   });
 
@@ -176,6 +257,7 @@ describe("routeMessage — default (agent)", () => {
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "handled" }] }));
       }),
     );
@@ -194,6 +276,7 @@ describe("routeMessage — default (agent)", () => {
       vi.fn().mockImplementation(async (input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return jsonResponse({ id: "ses_1" });
+        if (url.endsWith("/event")) return jsonResponse({});
         capturedBody = JSON.parse(await (input as Request).clone().text()) as unknown;
         return jsonResponse({ info: {}, parts: [{ type: "text", text: "nice photo!" }] });
       }),
@@ -217,6 +300,7 @@ describe("routeMessage — default (agent)", () => {
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_1" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "got it" }] }));
       }),
     );
@@ -229,7 +313,7 @@ describe("routeMessage — default (agent)", () => {
 describe("routeMessage — /new with media", () => {
   it("treats an empty media array the same as no media at all (bare '/new' resets, no agent call)", async () => {
     deps.sessions.set("111", "ses_old");
-    const reply = await routeMessage(deps, "111", "/new", { media: [] });
+    const reply = await routeMessage(deps, "111", CHAT_ID, "/new", { media: [] });
     expect(reply).toBe("Started a new conversation.");
   });
 
@@ -240,6 +324,7 @@ describe("routeMessage — /new with media", () => {
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "new session, got it" }] }));
       }),
     );
@@ -260,6 +345,7 @@ describe("routeMessage — agent context", () => {
       vi.fn().mockImplementation(async (input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return jsonResponse({ id: "ses_1" });
+        if (url.endsWith("/event")) return jsonResponse({});
         capturedBody = JSON.parse(await (input as Request).clone().text()) as unknown;
         return jsonResponse({ info: {}, parts: [{ type: "text", text: finalReply }] });
       }),
@@ -269,7 +355,7 @@ describe("routeMessage — agent context", () => {
 
   it("formats a 1:1-chat system context with the sender's name and phone", async () => {
     const capture = captureSystem();
-    const reply = await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: {
         senderName: "Alex Test",
         senderPhone: "111",
@@ -277,7 +363,7 @@ describe("routeMessage — agent context", () => {
       },
     });
 
-    expect(reply).toBe("ok");
+    expect(lastSentText()).toBe("ok");
     expect(capture.body()).toMatchObject({
       system:
         "You are being reached over WhatsApp.\n" +
@@ -288,7 +374,7 @@ describe("routeMessage — agent context", () => {
 
   it("formats a group-chat system context with the group's name", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: {
         senderName: "Alex",
         senderPhone: "111",
@@ -307,7 +393,7 @@ describe("routeMessage — agent context", () => {
 
   it("falls back to just the phone number when the sender's push name is unavailable", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: { senderPhone: "111", isGroupChat: false },
     });
 
@@ -318,7 +404,7 @@ describe("routeMessage — agent context", () => {
 
   it("says just 'a group' when the group has no known name", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: { senderPhone: "111", isGroupChat: true },
     });
 
@@ -328,7 +414,7 @@ describe("routeMessage — agent context", () => {
 
   it("includes the send timestamp as an ISO string when provided", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: {
         senderPhone: "111",
         isGroupChat: false,
@@ -343,7 +429,7 @@ describe("routeMessage — agent context", () => {
 
   it("includes the replied-to message's text when present", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: {
         senderPhone: "111",
         isGroupChat: false,
@@ -360,7 +446,7 @@ describe("routeMessage — agent context", () => {
 
   it("omits the system field entirely when no context is given", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi");
+    await routeMessage(deps, "111", CHAT_ID, "hi");
 
     const body = capture.body() as { system?: unknown };
     expect(body.system).toBeUndefined();
@@ -368,7 +454,7 @@ describe("routeMessage — agent context", () => {
 
   it("includes a shared location when present", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: {
         senderPhone: "111",
         isGroupChat: false,
@@ -385,7 +471,7 @@ describe("routeMessage — agent context", () => {
 
   it("includes recent group history when present", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: {
         senderPhone: "111",
         isGroupChat: true,
@@ -400,7 +486,7 @@ describe("routeMessage — agent context", () => {
 
   it("omits the recent-history line when not present", async () => {
     const capture = captureSystem();
-    await routeMessage(deps, "111", "hi", {
+    await routeMessage(deps, "111", CHAT_ID, "hi", {
       context: { senderPhone: "111", isGroupChat: false },
     });
 
@@ -414,6 +500,7 @@ describe("routeMessage — agent context", () => {
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
         if (url.endsWith("/session")) return Promise.resolve(jsonResponse({ id: "ses_new" }));
+        if (url.endsWith("/event")) return Promise.resolve(jsonResponse({}));
         return Promise.resolve(
           jsonResponse({ info: {}, parts: [{ type: "text", text: "got your location" }] }),
         );
@@ -421,11 +508,11 @@ describe("routeMessage — agent context", () => {
     );
     deps.sessions.set("111", "ses_old");
 
-    const reply = await routeMessage(deps, "111", "/new", {
+    await routeMessage(deps, "111", CHAT_ID, "/new", {
       context: { senderPhone: "111", isGroupChat: false, locationText: "1.5, 2.5" },
     });
 
-    expect(reply).toBe("got your location");
+    expect(lastSentText()).toBe("got your location");
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
 });

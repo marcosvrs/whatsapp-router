@@ -103,6 +103,30 @@ describe("WahaClient.startTyping", () => {
   });
 });
 
+describe("WahaClient.stopTyping", () => {
+  it("posts to /api/stopTyping with the session and chatId", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.stopTyping("111@c.us");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://waha.test/api/stopTyping");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({ "Content-Type": "application/json", "X-Api-Key": "key123" });
+    expect(JSON.parse(init.body as string)).toEqual({ session: "MySession", chatId: "111@c.us" });
+  });
+
+  it("logs on failure", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.stopTyping("111@c.us");
+    expect(logSpy.mock.calls[0]?.slice(1)).toEqual(["stopTyping failed", 500, "oops"]);
+  });
+});
+
 describe("WahaClient.markChatRead", () => {
   it("posts to the session-scoped read endpoint, URL-encoding the chat id", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
