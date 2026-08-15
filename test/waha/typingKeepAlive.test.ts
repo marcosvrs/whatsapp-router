@@ -45,17 +45,22 @@ describe("TypingPresence", () => {
   });
 
   it("brackets a send with stopTyping then sendText then startTyping", async () => {
-    const waha = fakeWaha();
     const calls: string[] = [];
-    (waha.stopTyping as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      calls.push("stop");
-    });
-    (waha.sendText as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      calls.push("send");
-    });
-    (waha.startTyping as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      calls.push("start");
-    });
+    const waha: WahaClientLike = {
+      ...fakeWaha(),
+      stopTyping: vi.fn(() => {
+        calls.push("stop");
+        return Promise.resolve();
+      }),
+      sendText: vi.fn(() => {
+        calls.push("send");
+        return Promise.resolve();
+      }),
+      startTyping: vi.fn(() => {
+        calls.push("start");
+        return Promise.resolve();
+      }),
+    };
 
     const typing = new TypingPresence(waha);
     typing.begin("chat1");

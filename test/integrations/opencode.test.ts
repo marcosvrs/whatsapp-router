@@ -10,7 +10,7 @@ const createOpencodeClient = vi.fn(() => ({
 
 vi.mock("@opencode-ai/sdk", () => ({ createOpencodeClient }));
 
-const { OpencodeClient } = await import("../../src/integrations/opencode.js");
+const { OpencodeClient, IDLE_GRACE_MS, MAX_WAIT_MS } = await import("../../src/integrations/opencode.js");
 
 function ok<T>(data: T, status = 200): { data: T; error: undefined; response: { status: number } } {
   return { data, error: undefined, response: { status } };
@@ -411,7 +411,7 @@ describe("OpencodeClient.watchSession", () => {
     eventSubscribe.mockResolvedValue({ stream: source.stream });
     const onMessage = vi.fn();
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", onMessage);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", onMessage);
 
     source.push(textPartUpdated("msg_1", "prt_1", "ses_1", ""));
     source.push(textPartUpdated("msg_1", "prt_1", "ses_1", "hello world"));
@@ -435,7 +435,7 @@ describe("OpencodeClient.watchSession", () => {
     eventSubscribe.mockResolvedValue({ stream: source.stream });
     const onMessage = vi.fn();
 
-    const { stop } = client().watchSession("ses_1", onMessage);
+    const { stop } = await client().watchSession("ses_1", onMessage);
     source.push(textPartUpdated("msg_1", "prt_1", "ses_other", "not for us"));
     source.push(assistantFinished("msg_1", "ses_other"));
     source.end();
@@ -453,7 +453,7 @@ describe("OpencodeClient.watchSession", () => {
     eventSubscribe.mockResolvedValue({ stream: source.stream });
     const onMessage = vi.fn();
 
-    const { stop } = client().watchSession("ses_1", onMessage);
+    const { stop } = await client().watchSession("ses_1", onMessage);
     source.push(assistantFinished("msg_1", "ses_1"));
     source.end();
 
@@ -469,7 +469,7 @@ describe("OpencodeClient.watchSession", () => {
     const source = fakeEventSource();
     eventSubscribe.mockResolvedValue({ stream: source.stream });
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", vi.fn());
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     source.end();
 
     await awaitIdle();
@@ -480,7 +480,7 @@ describe("OpencodeClient.watchSession", () => {
     const source = fakeEventSource();
     eventSubscribe.mockResolvedValue({ stream: source.stream });
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", vi.fn());
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
       resolved = true;
@@ -499,7 +499,7 @@ describe("OpencodeClient.watchSession", () => {
     const source = fakeEventSource();
     eventSubscribe.mockResolvedValue({ stream: source.stream });
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", vi.fn());
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
       resolved = true;
@@ -521,22 +521,25 @@ describe("OpencodeClient.watchSession", () => {
     const source = fakeEventSource();
     eventSubscribe.mockResolvedValue({ stream: source.stream });
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", vi.fn());
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
       resolved = true;
     });
 
-    // Reset the quiet timer every 3 minutes (under the 4-minute grace window)
-    // so it never naturally elapses — proves the ceiling is an independent
+    // Reset the quiet timer just under the grace window, repeatedly, so it
+    // never naturally elapses — proves the ceiling is an independent
     // backstop, not just a longer version of the quiet timeout.
-    for (let i = 0; i < 4; i++) {
-      await vi.advanceTimersByTimeAsync(3 * 60_000);
+    const resetInterval = IDLE_GRACE_MS - 1000;
+    let elapsed = 0;
+    while (elapsed + resetInterval < MAX_WAIT_MS) {
+      await vi.advanceTimersByTimeAsync(resetInterval);
+      elapsed += resetInterval;
       source.push(sessionStatus("ses_1"));
     }
     expect(resolved).toBe(false);
 
-    await vi.advanceTimersByTimeAsync(3 * 60_000); // total 15 min — ceiling fires regardless
+    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS - elapsed + 1); // ceiling fires regardless
     expect(resolved).toBe(true);
     stop();
   });
@@ -549,7 +552,7 @@ describe("OpencodeClient.watchSession", () => {
     const source = fakeEventSource();
     eventSubscribe.mockResolvedValue({ stream: source.stream });
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", vi.fn());
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
       resolved = true;
@@ -567,16 +570,34 @@ describe("OpencodeClient.watchSession", () => {
     const source = fakeEventSource();
     eventSubscribe.mockResolvedValue({ stream: source.stream });
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", vi.fn());
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     stop();
     await awaitIdle();
   });
 
-  it("logs and settles cleanly when the stream itself errors", async () => {
+  it("rejects when the initial SSE connection fails, rather than returning a broken watch", async () => {
+    // The connection is awaited before watchSession() ever returns, so the
+    // caller (router.ts's watchOrNoop) can catch this and degrade gracefully
+    // instead of proceeding with a watch that was never actually live.
     eventSubscribe.mockRejectedValue(new Error("connection reset"));
+
+    await expect(client().watchSession("ses_1", vi.fn())).rejects.toThrow("connection reset");
+  });
+
+  it("logs and settles cleanly when the stream errors after connecting successfully", async () => {
+    const throwingStream = {
+      [Symbol.asyncIterator]() {
+        return {
+          next(): Promise<IteratorResult<unknown>> {
+            return Promise.reject(new Error("dropped mid-stream"));
+          },
+        };
+      },
+    };
+    eventSubscribe.mockResolvedValue({ stream: throwingStream });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
-    const { awaitIdle, stop } = client().watchSession("ses_1", vi.fn());
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     await awaitIdle();
     stop();
 
@@ -588,7 +609,7 @@ describe("OpencodeClient.watchSession", () => {
     eventSubscribe.mockResolvedValue({ stream: source.stream });
     const onMessage = vi.fn();
 
-    const { stop } = client().watchSession("ses_1", onMessage);
+    const { stop } = await client().watchSession("ses_1", onMessage);
     source.push({ type: "server.heartbeat", properties: {} });
     source.end();
 

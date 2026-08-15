@@ -1,4 +1,8 @@
-import type { OpencodeClient, OpencodeMediaAttachment } from "./integrations/opencode.js";
+import type {
+  OpencodeClient,
+  OpencodeMediaAttachment,
+  OpencodeSessionWatch,
+} from "./integrations/opencode.js";
 import { log } from "./log.js";
 import { markdownToWhatsapp } from "./markdownToWhatsapp.js";
 import type { SenderLock } from "./senderLock.js";
@@ -75,6 +79,28 @@ function deliver(deps: RouterDeps, chatId: string, text: string): Promise<void> 
   return deps.typing.send(chatId, markdownToWhatsapp(text));
 }
 
+// watchSession() only rejects on a narrow failure — event.subscribe() unable
+// to even build the request (e.g. a malformed auth header) — since real
+// connectivity problems are handled inside the SDK's own bounded-retry SSE
+// client instead (see watchSession's comment). Still worth degrading
+// gracefully rather than failing the whole exchange over it, matching the
+// same "enrichment degrades gracefully, the core request doesn't" pattern
+// server.ts already uses for the recent-group-history fetch: streaming
+// background-task follow-ups is an enhancement on top of send()'s own reply,
+// not something worth losing that reply over.
+async function watchOrNoop(
+  deps: RouterDeps,
+  sessionId: string,
+  onTurn: (messageId: string, text: string) => void,
+): Promise<OpencodeSessionWatch> {
+  try {
+    return await deps.opencode.watchSession(sessionId, onTurn);
+  } catch (err) {
+    log("watchSession connect failed — continuing without live streaming", err instanceof Error ? err.message : String(err));
+    return { awaitIdle: () => Promise.resolve(), stop: () => undefined };
+  }
+}
+
 // Delivers directly to WhatsApp as each turn completes rather than returning
 // text for the caller to send — a single exchange can now produce more than
 // one message over several minutes (background tasks), which a single
@@ -109,12 +135,20 @@ async function handleAgent(
         // the exact same turn send() itself returns, so delivery is deduped
         // by message id below.
         const delivered = new Set<string>();
+        // deliver() is never awaited by its caller below (a slow delivery
+        // must not block the loop consuming further SSE events) — but an
+        // unawaited rejection with nothing catching it would crash the whole
+        // process on Node's default unhandled-rejection behavior, taking
+        // every in-flight chat down with it, not just this one. Always
+        // caught and logged instead.
         const onTurn = (messageId: string, turnText: string): void => {
           if (delivered.has(messageId)) return;
           delivered.add(messageId);
-          void deliver(deps, chatId, turnText);
+          void deliver(deps, chatId, turnText).catch((err: unknown) => {
+            log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
+          });
         };
-        let watch = deps.opencode.watchSession(sessionId, onTurn);
+        let watch = await watchOrNoop(deps, sessionId, onTurn);
         try {
           const result = await deps.opencode.send(sessionId, text, {
             media: extras.media,
@@ -130,7 +164,7 @@ async function handleAgent(
             watch.stop();
             deps.sessions.set(senderKey, result.sessionId);
             sessionId = result.sessionId;
-            watch = deps.opencode.watchSession(sessionId, onTurn);
+            watch = await watchOrNoop(deps, sessionId, onTurn);
           }
           onTurn(result.messageId, result.reply);
           await watch.awaitIdle();

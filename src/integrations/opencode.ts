@@ -57,16 +57,23 @@ function extractReplyText(parts: Part[]): string {
   );
 }
 
-// How long to keep watching a session after it goes idle before treating the
-// exchange as settled — chosen after live-testing a real multi-round
-// background-task exchange (individual round durations of 1m5s and 1m42s,
-// including one rate-limit retry), so this comfortably clears the observed
-// worst case.
-const IDLE_GRACE_MS = 4 * 60_000;
-// Hard ceiling regardless of activity — a real end-to-end background-task run
-// took ~5-6 minutes wall clock, so this leaves real margin without being
-// unbounded.
-const MAX_WAIT_MS = 15 * 60_000;
+// How long to keep watching a session after its last activity before
+// treating the exchange as settled — chosen after live-testing a real
+// multi-round background-task exchange (individual round durations of 1m5s
+// and 1m42s, including one rate-limit retry), so this comfortably clears the
+// observed worst case. This is the mechanism that actually scales to a
+// session of any length: it resets on every event, so a session genuinely
+// still working — background tasks can legitimately run for hours — keeps
+// getting watched for as long as it keeps producing activity, with no
+// artificial duration cap.
+export const IDLE_GRACE_MS = 4 * 60_000;
+// A true backstop, not a normal-operation cutoff — only fires if a session
+// somehow produces zero activity of any kind (no idle, no status, nothing)
+// for this entire span, which the quiet timer above would already have
+// caught long before. Generous on purpose so it can never be the thing that
+// cuts off a real, still-working exchange; it only exists to bound a
+// genuinely stuck/leaked connection.
+export const MAX_WAIT_MS = 6 * 60 * 60_000;
 
 export interface OpencodeSessionWatch {
   // Resolves once the session has gone quiet (or the hard ceiling is hit).
@@ -179,7 +186,14 @@ export class OpencodeClient {
   // Delivery fires on any completed assistant turn (any truthy `finish`, not
   // just "stop" — confirmed live via an intermediate turn with
   // finish: "tool-calls" carrying real user-facing text).
-  watchSession(sessionId: string, onMessage: (messageId: string, text: string) => void): OpencodeSessionWatch {
+  // Returns a Promise so the caller can be sure the SSE connection is
+  // actually live before proceeding to send() — otherwise an event for an
+  // early turn could fire and pass in the gap between this call returning
+  // and the underlying subscribe() handshake actually completing.
+  async watchSession(
+    sessionId: string,
+    onMessage: (messageId: string, text: string) => void,
+  ): Promise<OpencodeSessionWatch> {
     const controller = new AbortController();
     // messageId -> partId -> latest text (message.part.updated always carries
     // the full current value, not a delta — confirmed live).
@@ -225,17 +239,42 @@ export class OpencodeClient {
     };
     resetQuietTimer();
 
+    // event.subscribe() itself resolves as soon as the request is built
+    // (auth headers, URL) — confirmed by reading the SDK's own SSE client:
+    // the actual fetch is deferred into the returned async generator and
+    // only happens once it's first iterated, below. So awaiting this only
+    // guards against subscribe() failing to even construct the request (e.g.
+    // a bad auth header) — it does not confirm a live connection. Real
+    // connectivity issues surface once the loop below starts consuming.
+    //
+    // sseMaxRetryAttempts is set explicitly because the SDK's own default is
+    // unlimited retries with exponential backoff — against a genuinely
+    // unreachable opencode server that would retry forever, repeatedly
+    // hitting it. Bounded here instead; onSseError logs each attempt so a
+    // struggling server is visible rather than silently retried.
+    const { stream } = await this.client.event.subscribe({
+      signal: controller.signal,
+      sseMaxRetryAttempts: 3,
+      onSseError: (err) => {
+        log("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
+      },
+    });
+
     void (async () => {
       try {
-        const { stream } = await this.client.event.subscribe({ signal: controller.signal });
         for await (const event of stream) {
           if (controller.signal.aborted) break;
           let relevant = false;
           switch (event.type) {
             case "message.part.updated": {
               const { part } = event.properties;
-              if (part.sessionID !== sessionId || part.type !== "text") break;
+              if (part.sessionID !== sessionId) break;
+              // Any part scoped to this session counts as activity, even
+              // when it isn't text (e.g. a long-running tool call) — only
+              // text parts feed delivery, but non-text activity must still
+              // keep the quiet timer from elapsing mid-turn.
               relevant = true;
+              if (part.type !== "text") break;
               let byPart = partsByMessage.get(part.messageID);
               if (!byPart) {
                 byPart = new Map();
