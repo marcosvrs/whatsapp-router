@@ -14,24 +14,40 @@ function logStartTypingFailure(err: unknown): void {
 // including any background-task rounds that complete after the first reply.
 // Bundles WAHA's own documented bracket (startTyping -> wait -> stopTyping ->
 // sendText) into send(). Whether send() resumes typing afterward is driven by
-// whether begin()/end() currently consider the chat "active" — a one-off
-// caller that never calls begin() gets a single clean bracketed send with
-// nothing left running, without having to remember to call end() itself.
+// whether the chat is still "active" — a one-off caller that never calls
+// begin() gets a single clean bracketed send with nothing left running,
+// without having to remember to call end() itself.
+//
+// State is refcounted per chat, not just a boolean: `allowlist.ts`'s group
+// handling lets multiple different senders concurrently trigger the bot in
+// the same group chat — SenderLock only serializes per *sender*, so two
+// overlapping exchanges can share one chatId. A boolean "active" set would
+// let the second exchange's begin() silently replace the first's interval
+// (leaking the old one), and whichever exchange finishes first would call
+// end() and kill typing out from under the other, still-running one. All
+// three mutating operations (begin/send/end) go through the same per-chat
+// lock so they can't race each other, and end() only truly ends the chat
+// once the last concurrent exchange for it has finished.
 export class TypingPresence {
   private readonly timers = new Map<string, ReturnType<typeof setInterval>>();
-  private readonly active = new Set<string>();
-  // Multiple turns can complete close together during a streamed exchange —
-  // send()/end() calls for the same chat are serialized so delivery always
-  // happens in the order it was requested, not in whichever order their HTTP
-  // round trips happen to resolve.
+  private readonly activeCount = new Map<string, number>();
   private readonly perChat = new SenderLock();
 
   constructor(private readonly waha: WahaClientLike) {}
 
   begin(chatId: string): void {
-    this.active.add(chatId);
-    void this.waha.startTyping(chatId).catch(logStartTypingFailure);
-    this.scheduleRefresh(chatId);
+    void this.perChat
+      .run(chatId, async () => {
+        const count = (this.activeCount.get(chatId) ?? 0) + 1;
+        this.activeCount.set(chatId, count);
+        if (count === 1) {
+          await this.waha.startTyping(chatId).catch(logStartTypingFailure);
+          this.scheduleRefresh(chatId);
+        }
+      })
+      .catch((err: unknown) => {
+        log("TypingPresence.begin failed", err instanceof Error ? err.message : String(err));
+      });
   }
 
   send(chatId: string, text: string): Promise<void> {
@@ -39,7 +55,7 @@ export class TypingPresence {
       this.pauseInterval(chatId);
       await this.waha.stopTyping(chatId);
       await this.waha.sendText(chatId, text);
-      if (this.active.has(chatId)) {
+      if ((this.activeCount.get(chatId) ?? 0) > 0) {
         await this.waha.startTyping(chatId);
         this.scheduleRefresh(chatId);
       }
@@ -48,7 +64,12 @@ export class TypingPresence {
 
   end(chatId: string): Promise<void> {
     return this.perChat.run(chatId, async () => {
-      this.active.delete(chatId);
+      const count = Math.max((this.activeCount.get(chatId) ?? 0) - 1, 0);
+      if (count > 0) {
+        this.activeCount.set(chatId, count);
+        return;
+      }
+      this.activeCount.delete(chatId);
       this.pauseInterval(chatId);
       await this.waha.stopTyping(chatId);
     });

@@ -26,15 +26,20 @@ afterEach(() => {
 });
 
 describe("TypingPresence", () => {
-  it("starts typing immediately on begin()", () => {
+  it("starts typing immediately on begin()", async () => {
     const waha = fakeWaha();
     new TypingPresence(waha).begin("chat1");
+    // begin() runs through the same per-chat lock as send()/end() (so a
+    // concurrent second exchange sharing the chat can't race it), which
+    // means its own startTyping call happens a tick later, not synchronously.
+    await vi.advanceTimersByTimeAsync(0);
     expect(waha.startTyping).toHaveBeenCalledWith("chat1");
   });
 
   it("refreshes typing periodically while active", async () => {
     const waha = fakeWaha();
     new TypingPresence(waha).begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
     expect(waha.startTyping).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(20_000);
@@ -64,6 +69,7 @@ describe("TypingPresence", () => {
 
     const typing = new TypingPresence(waha);
     typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0); // let begin()'s deferred startTyping settle first
     calls.length = 0; // discard begin()'s own startTyping call
     await typing.send("chat1", "hello");
 
@@ -130,5 +136,35 @@ describe("TypingPresence", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(waha.startTyping).toHaveBeenCalledWith("chat1");
     expect(waha.startTyping).not.toHaveBeenCalledWith("chat2");
+  });
+
+  it("two concurrent exchanges sharing a chat (e.g. two senders in one group) don't leak an interval or end each other's typing early", async () => {
+    const waha = fakeWaha();
+    const typing = new TypingPresence(waha);
+
+    typing.begin("chat1"); // exchange A (sender 1)
+    await vi.advanceTimersByTimeAsync(0);
+    typing.begin("chat1"); // exchange B (sender 2), same chat — SenderLock only serializes per sender
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Only one refresh interval should be running for the chat, not two.
+    (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(waha.startTyping).toHaveBeenCalledTimes(1);
+
+    // Exchange A finishes first — typing must stay up, B is still going.
+    await typing.end("chat1");
+    (waha.stopTyping as ReturnType<typeof vi.fn>).mockClear();
+    (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(waha.stopTyping).not.toHaveBeenCalled();
+    expect(waha.startTyping).toHaveBeenCalledWith("chat1");
+
+    // Exchange B finishes too — now it should actually stop.
+    await typing.end("chat1");
+    expect(waha.stopTyping).toHaveBeenCalledWith("chat1");
+    (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(waha.startTyping).not.toHaveBeenCalled();
   });
 });

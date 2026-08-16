@@ -252,10 +252,23 @@ export class OpencodeClient {
     // unreachable opencode server that would retry forever, repeatedly
     // hitting it. Bounded here instead; onSseError logs each attempt so a
     // struggling server is visible rather than silently retried.
+    //
+    // Once retries are exhausted, the SDK's generator ends normally (a plain
+    // `break`, not a throw — confirmed by reading its source) — from this
+    // loop's perspective that is indistinguishable from a genuinely finished,
+    // quiet session, both landing in the same `finally { settle("") }` below.
+    // connectionErrorState makes that ambiguity visible in the log instead of
+    // silently treating a severed connection as "the agent is done". An
+    // object property, not a bare `let` — the same reasoning as `settle`'s
+    // own guard above: read from a different closure (the loop below) than
+    // the one that writes it (onSseError here), a bare boolean gets
+    // over-narrowed to its initial literal by the type checker.
+    const connectionErrorState = { hadError: false };
     const { stream } = await this.client.event.subscribe({
       signal: controller.signal,
       sseMaxRetryAttempts: 3,
       onSseError: (err) => {
+        connectionErrorState.hadError = true;
         log("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
       },
     });
@@ -311,6 +324,12 @@ export class OpencodeClient {
           log("watchSession stream error", err instanceof Error ? err.message : String(err));
         }
       } finally {
+        if (!controller.signal.aborted && connectionErrorState.hadError) {
+          log(
+            "watchSession stream ended after connection retries were exhausted — " +
+              "may not reflect the session actually being done",
+          );
+        }
         settle("");
       }
     })();
