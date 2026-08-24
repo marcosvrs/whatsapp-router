@@ -102,10 +102,7 @@ function requiresFullVerification(file) {
     file === "vitest.config.ts" ||
     file === "stryker.config.mjs" ||
     file === "src/index.ts" ||
-    file.startsWith("tsconfig") ||
-    file.startsWith("scripts/") ||
-    file.startsWith(".githooks/") ||
-    file.startsWith(".github/workflows/")
+    file.startsWith("tsconfig")
   );
 }
 
