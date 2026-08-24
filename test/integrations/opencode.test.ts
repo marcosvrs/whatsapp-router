@@ -793,6 +793,111 @@ describe("OpencodeClient.watchSession", () => {
     logSpy.mockRestore();
   });
 
+  it("reconnects after exhausted SSE retries while a prompt lease is active", async () => {
+    const first = fakeEventSource();
+    const second = fakeEventSource();
+    eventSubscribe
+      .mockImplementationOnce(() => {
+        first.push({ type: "server.connected", properties: {} });
+        return { stream: first.stream };
+      })
+      .mockImplementationOnce(() => {
+        second.push({ type: "server.connected", properties: {} });
+        return { stream: second.stream };
+      });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+    const release = watch.acquirePrompt("chat1");
+
+    first.end();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(eventSubscribe).toHaveBeenCalledTimes(2);
+
+    second.push(textPartUpdated("msg_1", "part_1", "ses_1", "after reconnect"));
+    second.push(assistantFinished("msg_1", "ses_1"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("msg_1", "after reconnect");
+    });
+
+    release?.();
+    second.end();
+    await watch.awaitIdle();
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).not.toContainEqual([
+      "watchSession stream ended after connection retries were exhausted — may not reflect the session actually being done",
+    ]);
+  });
+
+  it("retries a reconnect failure while tracked work remains", async () => {
+    const first = fakeEventSource();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    eventSubscribe
+      .mockImplementationOnce(() => {
+        first.push({ type: "server.connected", properties: {} });
+        return { stream: first.stream };
+      })
+      .mockRejectedValueOnce(new Error("reconnect down"));
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+
+    first.end();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "watchSession reconnect failed, retrying",
+      "reconnect down",
+    ]);
+
+    release?.();
+    watch.stop();
+  });
+
+  it("does not reconnect after tracked work is released before retry", async () => {
+    const first = fakeEventSource();
+    eventSubscribe.mockImplementationOnce(() => {
+      first.push({ type: "server.connected", properties: {} });
+      return { stream: first.stream };
+    });
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+
+    first.end();
+    await Promise.resolve();
+    release?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(eventSubscribe).toHaveBeenCalledTimes(1);
+    watch.stop();
+  });
+
+  it("reconnects when a silent tool keeps the session busy", async () => {
+    const first = fakeEventSource();
+    const second = fakeEventSource();
+    eventSubscribe
+      .mockImplementationOnce(() => {
+        first.push({ type: "server.connected", properties: {} });
+        return { stream: first.stream };
+      })
+      .mockImplementationOnce(() => {
+        second.push({ type: "server.connected", properties: {} });
+        return { stream: second.stream };
+      });
+    const watch = await client().watchSession("ses_1", vi.fn());
+    first.push({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "ses_1",
+        messageID: "tool_1",
+        partID: "tool_part",
+        field: "tool-input",
+        delta: "{}",
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    first.end();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(eventSubscribe).toHaveBeenCalledTimes(2);
+    watch.stop();
+  });
+
   it("rejects malformed delta payloads before processing valid text", async () => {
     const source = fakeEventSource();
     connectSource(source);
@@ -849,7 +954,10 @@ describe("OpencodeClient.watchSession", () => {
     const source = fakeEventSource();
     connectSource(source);
     const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
     watch.stop();
+    release?.();
+    watch.markPromptCompleted();
     expect(watch.acquirePrompt("chat1")).toBeUndefined();
     source.push({ type: "server.connected", properties: {} });
     await watch.awaitIdle();

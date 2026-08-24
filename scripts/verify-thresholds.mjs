@@ -32,6 +32,91 @@ function run(command, commandArgs) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
+function diffArgs(extraArgs) {
+  const diffArgs = ["diff", ...extraArgs, "--diff-filter=ACMRTUXBD"];
+  if (staged) {
+    diffArgs.splice(1, 0, "--cached");
+  } else if (base) {
+    diffArgs.push(base, "HEAD");
+  } else {
+    console.error("changed threshold verification requires --staged or --base <revision>");
+    process.exit(2);
+  }
+  return diffArgs;
+}
+
+function changedFiles() {
+  return execFileSync("git", diffArgs(["--name-only"]), { encoding: "utf8" })
+    .split("\n")
+    .map((file) => file.trim())
+    .filter(Boolean);
+}
+
+function changedMutationRanges() {
+  const patch = execFileSync("git", diffArgs(["--unified=0"]), { encoding: "utf8" });
+  const ranges = new Map();
+  let oldFile;
+  let currentFile;
+  let deletedSource = false;
+
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("--- a/")) {
+      oldFile = line.slice(6);
+      continue;
+    }
+    if (line === "+++ /dev/null") {
+      deletedSource ||= isSourceFile(oldFile ?? "");
+      currentFile = undefined;
+      continue;
+    }
+    if (line.startsWith("+++ b/")) {
+      currentFile = line.slice(6);
+      continue;
+    }
+    if (!currentFile || !line.startsWith("@@ ")) continue;
+    const match = /\+(\d+)(?:,(\d+))?/.exec(line);
+    if (!match || !isSourceFile(currentFile)) continue;
+    const start = Number(match[1]);
+    const count = Number(match[2] ?? "1");
+    if (count === 0) continue;
+    const fileRanges = ranges.get(currentFile) ?? [];
+    fileRanges.push({ start, end: start + count - 1 });
+    ranges.set(currentFile, fileRanges);
+  }
+
+  const mergedRanges = [];
+  for (const [file, fileRanges] of ranges) {
+    fileRanges.sort((left, right) => left.start - right.start);
+    let current = fileRanges[0];
+    for (const next of fileRanges.slice(1)) {
+      if (next.start <= current.end + 1) {
+        current.end = Math.max(current.end, next.end);
+      } else {
+        mergedRanges.push(`${file}:${current.start}-${current.end}`);
+        current = next;
+      }
+    }
+    if (current) mergedRanges.push(`${file}:${current.start}-${current.end}`);
+  }
+  return { ranges: mergedRanges, deletedSource };
+}
+
+function isSourceFile(file) {
+  return file.startsWith("src/") && file.endsWith(".ts");
+}
+
+function requiresFullVerification(file) {
+  return (
+    file === "package.json" ||
+    file === "package-lock.json" ||
+    file === ".npmrc" ||
+    file === "vitest.config.ts" ||
+    file === "stryker.config.mjs" ||
+    file === "src/index.ts" ||
+    file.startsWith("tsconfig")
+  );
+}
+
 function runCoverage(sourceFiles) {
   if (!sourceFiles) {
     run("npm", ["run", "test:coverage"]);
@@ -53,9 +138,13 @@ function runCoverage(sourceFiles) {
   run("npm", coverageArgs);
 }
 
-function runMutation(sourceFiles) {
-  if (!sourceFiles) {
+function runMutation(mutationRanges) {
+  if (!mutationRanges) {
     run("npm", ["run", "test:mutation"]);
+    return;
+  }
+  if (mutationRanges.length === 0) {
+    console.log("No changed executable mutation targets; mutation checks are not required.");
     return;
   }
 
@@ -65,59 +154,27 @@ function runMutation(sourceFiles) {
     "--",
     "stryker",
     "run",
-    `--mutate=${sourceFiles.join(",")}`,
+    `--mutate=${mutationRanges.join(",")}`,
   ]);
 }
 
-function runSelected(sourceFiles) {
+function runSelected(sourceFiles, mutationRanges) {
   if (!mutationOnly) runCoverage(sourceFiles);
-  if (!coverageOnly) runMutation(sourceFiles);
-}
-
-function changedFiles() {
-  const diffArgs = ["diff", "--name-only", "--diff-filter=ACMRTUXBD"];
-  if (staged) {
-    diffArgs.splice(1, 0, "--cached");
-  } else if (base) {
-    diffArgs.push(base, "HEAD");
-  } else {
-    console.error("changed threshold verification requires --staged or --base <revision>");
-    process.exit(2);
-  }
-  return execFileSync("git", diffArgs, { encoding: "utf8" })
-    .split("\n")
-    .map((file) => file.trim())
-    .filter(Boolean);
-}
-
-function isSourceFile(file) {
-  return file.startsWith("src/") && file.endsWith(".ts");
-}
-
-function requiresFullVerification(file) {
-  return (
-    file === "package.json" ||
-    file === "package-lock.json" ||
-    file === ".npmrc" ||
-    file === "vitest.config.ts" ||
-    file === "stryker.config.mjs" ||
-    file === "src/index.ts" ||
-    file.startsWith("tsconfig")
-  );
+  if (!coverageOnly) runMutation(mutationRanges);
 }
 
 if (full) {
-  runSelected(undefined);
+  runSelected(undefined, undefined);
   process.exit(0);
 }
 
 const changed = changedFiles();
 const sourceChanges = changed.filter(isSourceFile);
-const deletedSource = sourceChanges.some((file) => !existsSync(file));
+const { ranges: mutationRanges, deletedSource } = changedMutationRanges();
 const forceFull = deletedSource || changed.some(requiresFullVerification);
 
 if (forceFull) {
-  runSelected(undefined);
+  runSelected(undefined, undefined);
   process.exit(0);
 }
 
@@ -127,4 +184,4 @@ if (sourceFiles.length === 0) {
   process.exit(0);
 }
 
-runSelected(sourceFiles);
+runSelected(sourceFiles, mutationRanges);

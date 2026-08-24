@@ -281,6 +281,7 @@ export class OpencodeClient {
     let quietTimer: ReturnType<typeof setTimeout>;
     let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
     let connectionTimer: ReturnType<typeof setTimeout> | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let resolveIdle: () => void;
     let resolveConnection!: () => void;
     let rejectConnection!: (error: unknown) => void;
@@ -297,14 +298,15 @@ export class OpencodeClient {
     const idlePromise = new Promise<void>((resolve) => {
       resolveIdle = resolve;
     });
-
     const settle = (reason: string): void => {
       if (controller.signal.aborted) return;
       clearTimeout(quietTimer);
       clearTimeout(ceilingTimer);
       clearTimeout(idleCandidateTimer);
       clearTimeout(connectionTimer);
+      clearTimeout(reconnectTimer);
       connectionTimer = undefined;
+      reconnectTimer = undefined;
       if (reason) log("watchSession", reason);
       controller.abort();
       resolveIdle();
@@ -335,6 +337,27 @@ export class OpencodeClient {
         if (!sessionBusy && !backgroundWorkPending && promptLeases === 0 && hasCompletedAssistantTurn) {
           settle("session idle");
         }
+      }, 1_000);
+    };
+
+    const hasTrackedWork = (): boolean => sessionBusy || backgroundWorkPending || promptLeases > 0;
+    const reconnect = async (): Promise<void> => {
+      if (controller.signal.aborted || !hasTrackedWork()) return;
+      connectionErrorState.hadError = false;
+      connectionErrorState.attempts = 0;
+      try {
+        const { stream } = await subscribe();
+        await consume(stream);
+      } catch (err) {
+        log("watchSession reconnect failed, retrying", err instanceof Error ? err.message : String(err));
+        scheduleReconnect();
+      }
+    };
+    const scheduleReconnect = (): void => {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        void reconnect();
       }, 1_000);
     };
 
@@ -391,9 +414,8 @@ export class OpencodeClient {
     // event.subscribe() returns a lazy async stream. The current server emits
     // server.connected as its first event, and the SDK callback fires only
     // once the actual SSE request has produced an event.
-    let subscribeResult: Awaited<ReturnType<SdkClient["event"]["subscribe"]>>;
-    try {
-      subscribeResult = await this.client.event.subscribe({
+    const subscribe = async (): Promise<Awaited<ReturnType<SdkClient["event"]["subscribe"]>>> =>
+      this.client.event.subscribe({
         signal: controller.signal,
         sseMaxRetryAttempts: 3,
         onSseEvent: () => {
@@ -405,25 +427,19 @@ export class OpencodeClient {
           log("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
         },
       });
-    } catch (err) {
-      settle("SSE subscription setup failed");
-      clearTimeout(ceilingTimer);
-      throw err;
-    }
 
-    const { stream } = subscribeResult;
-    void (async () => {
+    async function consume(stream: AsyncIterable<unknown>): Promise<void> {
       try {
         for await (const event of stream) {
           if (controller.signal.aborted) break;
           markConnected();
-          clearTimeout(idleCandidateTimer);
-          const rawEvent = event as unknown as Event | MessagePartDeltaEvent;
+          const rawEvent = event as Event | MessagePartDeltaEvent;
           let relevant = false;
 
           if (isMessagePartDeltaEvent(rawEvent)) {
             const { properties } = rawEvent;
             if (properties.sessionID === sessionId) {
+              clearTimeout(idleCandidateTimer);
               relevant = true;
               if (properties.field === "text") {
                 let byPart = partsByMessage.get(properties.messageID);
@@ -454,6 +470,7 @@ export class OpencodeClient {
               case "message.part.updated": {
                 const { part } = typedEvent.properties;
                 if (part.sessionID !== sessionId) break;
+                clearTimeout(idleCandidateTimer);
                 relevant = true;
                 if (part.type !== "text") sessionBusy = true;
                 let byPart = partsByMessage.get(part.messageID);
@@ -476,6 +493,7 @@ export class OpencodeClient {
               case "message.updated": {
                 const { info } = typedEvent.properties;
                 if (info.sessionID !== sessionId) break;
+                clearTimeout(idleCandidateTimer);
                 relevant = true;
                 const byPart = partsByMessage.get(info.id);
                 const text = byPart ? joinTexts([...byPart.values()]) : "";
@@ -521,6 +539,7 @@ export class OpencodeClient {
               case "session.idle":
               case "session.status": {
                 if (typedEvent.properties.sessionID !== sessionId) break;
+                clearTimeout(idleCandidateTimer);
                 relevant = true;
                 if (typedEvent.type === "session.status") {
                   sessionBusy = typedEvent.properties.status.type !== "idle";
@@ -548,9 +567,27 @@ export class OpencodeClient {
               "may not reflect the session actually being done",
           );
         }
-        if (!controller.signal.aborted) settle("SSE stream ended");
+        if (!controller.signal.aborted) {
+          if (hasTrackedWork()) {
+            scheduleReconnect();
+          } else {
+            settle("SSE stream ended");
+          }
+        }
       }
-    })();
+    }
+
+
+    let subscribeResult: Awaited<ReturnType<SdkClient["event"]["subscribe"]>>;
+    try {
+      subscribeResult = await subscribe();
+    } catch (err) {
+      settle("SSE subscription setup failed");
+      clearTimeout(ceilingTimer);
+      throw err;
+    }
+
+    void consume(subscribeResult.stream);
 
     try {
       await connectionPromise;

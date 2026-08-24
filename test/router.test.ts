@@ -708,6 +708,46 @@ describe("routeMessage — agent context", () => {
     await Promise.all([first, second]);
   });
 
+  it("drops an unmapped streamed turn instead of using the watcher's first chat", async () => {
+    deps.sessions.set("111", "ses_1");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let onTurn!: (messageId: string, text: string, chatId?: string) => void;
+    vi.spyOn(deps.opencode, "watchSession").mockImplementation((_sessionId, callback) => {
+      onTurn = callback;
+      return Promise.resolve({
+        awaitIdle: () => done,
+        acquirePrompt: () => () => undefined,
+        markPromptCompleted: vi.fn(),
+        stop: vi.fn(),
+      });
+    });
+    const sendSpy = vi.spyOn(deps.opencode, "send").mockResolvedValue({
+      sessionId: "ses_1",
+      reply: "authoritative",
+      messageId: "authoritative",
+    });
+
+    const route = routeMessage(deps, "111", "direct", "prompt");
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    });
+    onTurn("streamed", "must not go to the first chat");
+
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "discarding unmapped agent turn",
+      "streamed",
+    ]);
+    expect(sentMessages).not.toContainEqual({ chatId: "direct", text: "must not go to the first chat" });
+
+    release();
+    await route;
+    expect(sentMessages).toEqual([{ chatId: "direct", text: "authoritative" }]);
+  });
+
   it("retries a delivery when the first attempt fails", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const send = vi

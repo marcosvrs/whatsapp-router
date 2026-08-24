@@ -116,7 +116,6 @@ export class AgentExchangeManager {
     }
     current?.stop();
 
-    const fallbackChatId = chatId;
     const delivered = new Set<string>();
     const inFlight = new Map<string, PendingDelivery>();
     const enqueueDelivery = (messageId: string, text: string, destinationChatId: string): void => {
@@ -143,7 +142,11 @@ export class AgentExchangeManager {
         });
     };
     const onTurn = (messageId: string, turnText: string, turnChatId?: string): void => {
-      enqueueDelivery(messageId, turnText, turnChatId ?? fallbackChatId);
+      if (!turnChatId) {
+        log("discarding unmapped agent turn", messageId);
+        return;
+      }
+      enqueueDelivery(messageId, turnText, turnChatId);
     };
     const watch = await watchOrNoop(deps, sessionId, onTurn);
     const exchangeRef: { current: ActiveAgentExchange | undefined } = { current: undefined };
