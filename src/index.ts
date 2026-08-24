@@ -2,6 +2,7 @@ import { loadConfig } from "./config.js";
 import { MessageDedupe } from "./dedupe.js";
 import { OpencodeClient } from "./integrations/opencode.js";
 import { log } from "./log.js";
+import { AgentExchangeManager } from "./router.js";
 import { RateLimiter } from "./rateLimit.js";
 import { SenderLock } from "./senderLock.js";
 import { SessionStore } from "./sessionStore.js";
@@ -30,6 +31,7 @@ const deps: ServerDeps = {
     sessions: new SessionStore(config.sessionsFile),
     senderLock: new SenderLock(),
     typing: new TypingPresence(waha),
+    exchanges: new AgentExchangeManager(),
   },
 };
 

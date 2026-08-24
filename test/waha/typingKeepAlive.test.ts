@@ -101,6 +101,55 @@ describe("TypingPresence", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(waha.startTyping).not.toHaveBeenCalled();
   });
+  it("still sends the message when stopTyping fails", async () => {
+    const waha = fakeWaha();
+    (waha.stopTyping as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("WAHA unavailable"));
+    const typing = new TypingPresence(waha);
+
+    await typing.send("chat1", "hello");
+
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+  });
+
+  it("orders an in-flight refresh before stopTyping and sendText", async () => {
+    const calls: string[] = [];
+    let releaseRefresh!: () => void;
+    const waha: WahaClientLike = {
+      ...fakeWaha(),
+      startTyping: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              calls.push("refresh-start");
+              releaseRefresh = () => {
+                calls.push("refresh-end");
+                resolve();
+              };
+            }),
+        ),
+      stopTyping: vi.fn(() => {
+        calls.push("stop");
+        return Promise.resolve();
+      }),
+      sendText: vi.fn(() => {
+        calls.push("send");
+        return Promise.resolve();
+      }),
+    };
+    const typing = new TypingPresence(waha);
+    typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20_000);
+    const sendPromise = typing.send("chat1", "hello");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual(["refresh-start"]);
+
+    releaseRefresh();
+    await sendPromise;
+    expect(calls).toEqual(["refresh-start", "refresh-end", "stop", "send"]);
+  });
 
   it("end() stops the refresh interval and calls stopTyping", async () => {
     const waha = fakeWaha();

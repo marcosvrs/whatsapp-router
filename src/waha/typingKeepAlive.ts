@@ -53,7 +53,12 @@ export class TypingPresence {
   send(chatId: string, text: string): Promise<void> {
     return this.perChat.run(chatId, async () => {
       this.pauseInterval(chatId);
-      await this.waha.stopTyping(chatId);
+      // Presence cleanup is best-effort. A transient WAHA failure must never
+      // suppress the actual reply, and the message id may already be marked
+      // delivered by the caller's dedupe set.
+      await this.waha.stopTyping(chatId).catch((err: unknown) => {
+        log("stopTyping failed", err instanceof Error ? err.message : String(err));
+      });
       await this.waha.sendText(chatId, text);
       if ((this.activeCount.get(chatId) ?? 0) > 0) {
         await this.waha.startTyping(chatId);
@@ -71,10 +76,11 @@ export class TypingPresence {
       }
       this.activeCount.delete(chatId);
       this.pauseInterval(chatId);
-      await this.waha.stopTyping(chatId);
+      await this.waha.stopTyping(chatId).catch((err: unknown) => {
+        log("stopTyping failed", err instanceof Error ? err.message : String(err));
+      });
     });
   }
-
   private pauseInterval(chatId: string): void {
     const timer = this.timers.get(chatId);
     if (timer) clearInterval(timer);
@@ -84,7 +90,17 @@ export class TypingPresence {
   private scheduleRefresh(chatId: string): void {
     this.timers.set(
       chatId,
-      setInterval(() => void this.waha.startTyping(chatId).catch(logStartTypingFailure), TYPING_REFRESH_MS),
+      setInterval(() => {
+        void this.perChat
+          .run(chatId, async () => {
+            if ((this.activeCount.get(chatId) ?? 0) > 0) {
+              await this.waha.startTyping(chatId);
+            }
+          })
+          .catch((err: unknown) => {
+            logStartTypingFailure(err);
+          });
+      }, TYPING_REFRESH_MS),
     );
   }
 }

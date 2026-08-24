@@ -89,7 +89,7 @@ function sessionIdle(sessionId: string) {
 }
 
 function sessionStatus(sessionId: string) {
-  return { type: "session.status", properties: { sessionID: sessionId, status: {} } };
+  return { type: "session.status", properties: { sessionID: sessionId, status: { type: "idle" } } };
 }
 
 describe("OpencodeClient construction", () => {
@@ -396,21 +396,31 @@ describe("OpencodeClient.send", () => {
 describe("OpencodeClient.watchSession", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(":\n\n", { status: 200 })));
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   function client() {
     return new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "" });
   }
 
+  function connectSource(source: { stream: AsyncIterable<unknown> }): void {
+    eventSubscribe.mockImplementation(
+      async (options: { fetch?: (request: Request) => Promise<Response> }) => {
+        await options.fetch?.(new Request("http://oc.test/event"));
+        return { stream: source.stream };
+      },
+    );
+  }
+
   it("delivers each completed assistant turn as it streams in, using the latest text per part", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
+    connectSource(source);
     const onMessage = vi.fn();
-
     const { awaitIdle, stop } = await client().watchSession("ses_1", onMessage);
 
     source.push(textPartUpdated("msg_1", "prt_1", "ses_1", ""));
@@ -418,31 +428,23 @@ describe("OpencodeClient.watchSession", () => {
     source.push(assistantFinished("msg_1", "ses_1"));
     source.push(textPartUpdated("msg_2", "prt_2", "ses_1", "second turn"));
     source.push(assistantFinished("msg_2", "ses_1", "tool-calls"));
-    source.end();
 
     await vi.waitFor(() => {
       expect(onMessage).toHaveBeenCalledTimes(2);
     });
     expect(onMessage).toHaveBeenNthCalledWith(1, "msg_1", "hello world");
     expect(onMessage).toHaveBeenNthCalledWith(2, "msg_2", "second turn");
-
-    await awaitIdle();
     stop();
+    await awaitIdle();
   });
 
   it("ignores events for a different session id", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
+    connectSource(source);
     const onMessage = vi.fn();
-
     const { stop } = await client().watchSession("ses_1", onMessage);
     source.push(textPartUpdated("msg_1", "prt_1", "ses_other", "not for us"));
     source.push(assistantFinished("msg_1", "ses_other"));
-    source.end();
-
-    await vi.waitFor(() => {
-      expect(eventSubscribe).toHaveBeenCalled();
-    });
     await vi.advanceTimersByTimeAsync(0);
     expect(onMessage).not.toHaveBeenCalled();
     stop();
@@ -450,141 +452,129 @@ describe("OpencodeClient.watchSession", () => {
 
   it("does not deliver a turn with no accumulated text", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
+    connectSource(source);
     const onMessage = vi.fn();
-
     const { stop } = await client().watchSession("ses_1", onMessage);
     source.push(assistantFinished("msg_1", "ses_1"));
-    source.end();
-
-    await vi.waitFor(() => {
-      expect(eventSubscribe).toHaveBeenCalled();
-    });
     await vi.advanceTimersByTimeAsync(0);
     expect(onMessage).not.toHaveBeenCalled();
     stop();
   });
 
-  it("resolves awaitIdle once the stream ends on its own with no idle event", async () => {
+  it("resolves awaitIdle when the stream ends on its own", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
-
-    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    connectSource(source);
+    const { awaitIdle } = await client().watchSession("ses_1", vi.fn());
     source.end();
-
     await awaitIdle();
-    stop();
   });
 
-  it("waits out the idle-grace window before resolving after session.idle", async () => {
+  it("settles promptly when an assistant turn is followed by an idle status", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
-
+    connectSource(source);
     const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
       resolved = true;
     });
-
-    source.push(sessionIdle("ses_1"));
-    await vi.advanceTimersByTimeAsync(3 * 60_000);
-    expect(resolved).toBe(false);
-
-    await vi.advanceTimersByTimeAsync(60_000 + 1);
+    source.push(textPartUpdated("msg_1", "prt_1", "ses_1", "done"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    source.push(sessionStatus("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
     expect(resolved).toBe(true);
     stop();
   });
 
-  it("resets the idle-grace timer when more activity arrives before it elapses", async () => {
+  it("does not settle while the session remains busy during a silent tool call", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
-
+    connectSource(source);
     const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
       resolved = true;
     });
-
-    source.push(sessionIdle("ses_1"));
-    await vi.advanceTimersByTimeAsync(3 * 60_000);
-    source.push(sessionStatus("ses_1")); // any relevant event resets the quiet timer, not just idle
-    await vi.advanceTimersByTimeAsync(90_000); // past the original deadline, but the reset pushed it out
+    source.push(textPartUpdated("msg_1", "prt_1", "ses_1", "working"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    source.push({ type: "session.status", properties: { sessionID: "ses_1", status: { type: "busy" } } });
+    await vi.advanceTimersByTimeAsync(IDLE_GRACE_MS + 1);
     expect(resolved).toBe(false);
+    stop();
+  });
 
+  it("keeps watching across background-task idle gaps until completion marker", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+    source.push(textPartUpdated("user_1", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
+    source.push({ type: "message.updated", properties: { info: { id: "user_1", sessionID: "ses_1", role: "user" } } });
     source.push(sessionIdle("ses_1"));
-    await vi.advanceTimersByTimeAsync(4 * 60_000 + 1);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(false);
+    source.push(textPartUpdated("user_2", "part_2", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
+    source.push({ type: "message.updated", properties: { info: { id: "user_2", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("msg_2", "part_3", "ses_1", "final"));
+    source.push(assistantFinished("msg_2", "ses_1"));
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
     expect(resolved).toBe(true);
     stop();
   });
 
-  it("hits the hard ceiling even with continuous activity that keeps resetting the quiet timer", async () => {
+  it("hits the hard ceiling even with continuous activity", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
-
+    connectSource(source);
     const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
       resolved = true;
     });
-
-    // Reset the quiet timer just under the grace window, repeatedly, so it
-    // never naturally elapses — proves the ceiling is an independent
-    // backstop, not just a longer version of the quiet timeout.
-    const resetInterval = IDLE_GRACE_MS - 1000;
+    const resetInterval = IDLE_GRACE_MS - 1_000;
     let elapsed = 0;
     while (elapsed + resetInterval < MAX_WAIT_MS) {
       await vi.advanceTimersByTimeAsync(resetInterval);
       elapsed += resetInterval;
-      source.push(sessionStatus("ses_1"));
+      source.push({ type: "session.status", properties: { sessionID: "ses_1", status: { type: "busy" } } });
     }
     expect(resolved).toBe(false);
-
-    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS - elapsed + 1); // ceiling fires regardless
+    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS - elapsed + 1);
     expect(resolved).toBe(true);
     stop();
   });
 
-  it("does not settle from a single idle-timing gap alone if it's under the grace window, even with zero events after", async () => {
-    // Guards the real regression this design fixes: a session can go fully
-    // quiet (no session.idle, no anything) once truly done, with no further
-    // events at all — awaitIdle must still resolve via the quiet timer
-    // itself, not depend on any particular event ever arriving.
+  it("delivers the authoritative agent error instead of partial text", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
-
-    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
-    let resolved = false;
-    void awaitIdle().then(() => {
-      resolved = true;
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    source.push(textPartUpdated("msg_1", "prt_1", "ses_1", "partial"));
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "msg_1",
+          sessionID: "ses_1",
+          role: "assistant",
+          finish: "stop",
+          error: { name: "APIError", data: { message: "failed" } },
+        },
+      },
     });
-
-    await vi.advanceTimersByTimeAsync(3 * 60_000 + 59_000);
-    expect(resolved).toBe(false);
-
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(resolved).toBe(true);
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("msg_1", "Agent error: failed");
+    });
     stop();
   });
-
-  it("stop() resolves awaitIdle immediately without waiting for the grace window", async () => {
-    const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
-
-    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
-    stop();
-    await awaitIdle();
-  });
-
-  it("rejects when the initial SSE connection fails, rather than returning a broken watch", async () => {
-    // The connection is awaited before watchSession() ever returns, so the
-    // caller (router.ts's watchOrNoop) can catch this and degrade gracefully
-    // instead of proceeding with a watch that was never actually live.
+  it("rejects when the initial SSE connection fails and cleans up timers", async () => {
     eventSubscribe.mockRejectedValue(new Error("connection reset"));
-
     await expect(client().watchSession("ses_1", vi.fn())).rejects.toThrow("connection reset");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("logs and settles cleanly when the stream errors after connecting successfully", async () => {
+  it("logs and settles cleanly when the stream errors after connecting", async () => {
     const throwingStream = {
       [Symbol.asyncIterator]() {
         return {
@@ -594,28 +584,24 @@ describe("OpencodeClient.watchSession", () => {
         };
       },
     };
-    eventSubscribe.mockResolvedValue({ stream: throwingStream });
+    eventSubscribe.mockImplementation(async (options: { fetch?: (request: Request) => Promise<Response> }) => {
+      await options.fetch?.(new Request("http://oc.test/event"));
+      return { stream: throwingStream };
+    });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-
-    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    const { awaitIdle } = await client().watchSession("ses_1", vi.fn());
     await awaitIdle();
-    stop();
-
     expect(logSpy.mock.calls.some((call) => call[1] === "watchSession stream error")).toBe(true);
+    logSpy.mockRestore();
   });
 
-  it("ignores an event type it doesn't otherwise handle (e.g. a server heartbeat)", async () => {
+  it("ignores an unhandled event type", async () => {
     const source = fakeEventSource();
-    eventSubscribe.mockResolvedValue({ stream: source.stream });
+    connectSource(source);
     const onMessage = vi.fn();
-
     const { stop } = await client().watchSession("ses_1", onMessage);
     source.push({ type: "server.heartbeat", properties: {} });
-    source.end();
-
-    await vi.waitFor(() => {
-      expect(eventSubscribe).toHaveBeenCalled();
-    });
+    await vi.advanceTimersByTimeAsync(0);
     expect(onMessage).not.toHaveBeenCalled();
     stop();
   });

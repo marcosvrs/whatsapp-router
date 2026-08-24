@@ -71,6 +71,65 @@ export interface RouterDeps {
   sessions: SessionStore;
   senderLock: SenderLock;
   typing: TypingPresence;
+  exchanges: AgentExchangeManager;
+}
+
+// Keeps one SSE watch per sender/session while allowing the sender lock to be
+// released as soon as the current prompt has produced its HTTP result. A
+// background exchange must not block a later inbound message for minutes, and
+// multiple prompts must not create duplicate watchers that deliver the same
+// turn twice.
+export interface ActiveAgentExchange {
+  readonly sessionId: string;
+  readonly chatId: string;
+  readonly done: Promise<void>;
+  deliver: (messageId: string, text: string) => void;
+  stop: () => void;
+}
+
+export class AgentExchangeManager {
+  private readonly active = new Map<string, ActiveAgentExchange>();
+
+  async acquire(
+    deps: RouterDeps,
+    senderKey: string,
+    sessionId: string,
+    chatId: string,
+  ): Promise<{ exchange: ActiveAgentExchange; created: boolean }> {
+    const current = this.active.get(senderKey);
+    if (current?.sessionId === sessionId) return { exchange: current, created: false };
+    current?.stop();
+
+    const delivered = new Set<string>();
+    const onTurn = (messageId: string, turnText: string): void => {
+      if (delivered.has(messageId)) return;
+      delivered.add(messageId);
+      void deliver(deps, chatId, turnText).catch((err: unknown) => {
+        log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
+      });
+    };
+    const watch = await watchOrNoop(deps, sessionId, onTurn);
+    const done = watch.awaitIdle().finally(() => {
+      if (this.active.get(senderKey)?.sessionId === sessionId) this.active.delete(senderKey);
+      watch.stop();
+    });
+    const exchange: ActiveAgentExchange = {
+      sessionId,
+      chatId,
+      done,
+      deliver: onTurn,
+      stop: () => {
+        watch.stop();
+        if (this.active.get(senderKey)?.sessionId === sessionId) this.active.delete(senderKey);
+      },
+    };
+    this.active.set(senderKey, exchange);
+    return { exchange, created: true };
+  }
+
+  stop(senderKey: string): void {
+    this.active.get(senderKey)?.stop();
+  }
 }
 
 // The agent's own reply is LLM-generated Markdown — WhatsApp uses a
@@ -102,11 +161,9 @@ async function watchOrNoop(
 }
 
 // Delivers directly to WhatsApp as each turn completes rather than returning
-// text for the caller to send — a single exchange can now produce more than
-// one message over several minutes (background tasks), which a single
-// return value can't represent. Returns null always; routeMessage's return
-// type stays string | null to cover the few synchronous early-return cases
-// that don't go through here.
+// text for the caller to send. The per-sender lock covers only session
+// mutation and the current prompt; the long-lived exchange watcher is awaited
+// after that lock is released.
 async function handleAgent(
   deps: RouterDeps,
   senderKey: string,
@@ -118,6 +175,10 @@ async function handleAgent(
     await deps.typing.send(chatId, "opencode agent not configured yet.");
     return null;
   }
+
+  let exchange!: ActiveAgentExchange;
+  let cleanupExchange: () => void = () => undefined;
+  let endTyping: () => Promise<void> = () => Promise.resolve();
   try {
     await deps.senderLock.run(senderKey, async () => {
       let sessionId = deps.sessions.get(senderKey);
@@ -125,66 +186,48 @@ async function handleAgent(
         sessionId = await deps.opencode.createSession();
         deps.sessions.set(senderKey, sessionId);
       }
+
       deps.typing.begin(chatId);
-      try {
-        // Watching starts *before* send() rather than after: confirmed live
-        // that a single send() call can internally produce several completed
-        // turns with real user-facing text (a multi-step agentic loop) before
-        // its own HTTP response resolves — watching only after would silently
-        // drop all but the last one. That overlap means the watch can observe
-        // the exact same turn send() itself returns, so delivery is deduped
-        // by message id below.
-        const delivered = new Set<string>();
-        // deliver() is never awaited by its caller below (a slow delivery
-        // must not block the loop consuming further SSE events) — but an
-        // unawaited rejection with nothing catching it would crash the whole
-        // process on Node's default unhandled-rejection behavior, taking
-        // every in-flight chat down with it, not just this one. Always
-        // caught and logged instead.
-        const onTurn = (messageId: string, turnText: string): void => {
-          if (delivered.has(messageId)) return;
-          delivered.add(messageId);
-          void deliver(deps, chatId, turnText).catch((err: unknown) => {
-            log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
-          });
+      endTyping = () => deps.typing.end(chatId);
+      const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
+      exchange = acquired.exchange;
+      if (acquired.created) {
+        cleanupExchange = () => {
+          deps.exchanges.stop(senderKey);
         };
-        let watch = await watchOrNoop(deps, sessionId, onTurn);
-        try {
-          const result = await deps.opencode.send(sessionId, text, {
-            media: extras.media,
-            system: extras.context ? formatSystemContext(extras.context) : undefined,
-          });
-          if (result.sessionId !== sessionId) {
-            // A stale (404) session was recreated inside send() — the old
-            // watch was on a session that no longer exists server-side, so
-            // stopping it loses nothing; restart on the real id. Anything the
-            // retried prompt produced internally before this point is the one
-            // known gap this doesn't cover (rare: only after an opencode
-            // server restart/db reset), same as before this change.
-            watch.stop();
-            deps.sessions.set(senderKey, result.sessionId);
-            sessionId = result.sessionId;
-            watch = await watchOrNoop(deps, sessionId, onTurn);
-          }
-          onTurn(result.messageId, result.reply);
-          await watch.awaitIdle();
-        } finally {
-          // Idempotent (stop() is a no-op once already settled), so this is
-          // safe to call again even when the try block already stopped and
-          // replaced `watch` above, or when send() itself threw before
-          // awaitIdle() ever ran.
-          watch.stop();
-        }
-      } finally {
-        await deps.typing.end(chatId);
       }
+
+      const result = await deps.opencode.send(sessionId, text, {
+        media: extras.media,
+        system: extras.context ? formatSystemContext(extras.context) : undefined,
+      });
+      if (result.sessionId !== sessionId) {
+        // A stale session was recreated inside send(). The old watcher cannot
+        // observe the retried prompt, so replace it with a watcher on the
+        // actual session and deliver the authoritative result below.
+        deps.exchanges.stop(senderKey);
+        deps.sessions.set(senderKey, result.sessionId);
+        const replacement = await deps.exchanges.acquire(deps, senderKey, result.sessionId, chatId);
+        exchange = replacement.exchange;
+        if (replacement.created) {
+          cleanupExchange = () => {
+            deps.exchanges.stop(senderKey);
+          };
+        }
+      }
+      exchange.deliver(result.messageId, result.reply);
     });
+
+    // This wait is deliberately outside senderLock.run(). A background task
+    // may keep typing alive for minutes, but a new inbound message must still
+    // be allowed to acquire the sender's prompt lock.
+    await exchange.done;
   } catch (err) {
+    cleanupExchange();
     log("opencode call failed", err instanceof Error ? err.message : String(err));
-    // Any error here happens either before begin() was ever called, or after
-    // the inner finally's end() already ran — either way typing.send() below
-    // sees this chat as inactive and won't resume its refresh interval.
     await deps.typing.send(chatId, "Agent call failed — check whatsapp-router logs.");
+  } finally {
+    await endTyping();
   }
   return null;
 }
@@ -207,9 +250,10 @@ export async function routeMessage(
   extras: RouteExtras = {},
 ): Promise<string | null> {
   const trimmed = text.trim();
-
   const newMatch = /^\/new\b(.*)$/i.exec(trimmed);
+
   if (newMatch) {
+    deps.exchanges.stop(senderKey);
     deps.sessions.reset(senderKey);
     const rest = (newMatch[1] ?? "").trim();
     if (!rest && !hasMedia(extras) && !extras.context?.locationText) {

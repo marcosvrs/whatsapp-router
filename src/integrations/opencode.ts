@@ -88,11 +88,13 @@ export interface OpencodeSessionWatch {
 
 export class OpencodeClient {
   private readonly client: SdkClient;
+  private readonly baseUrl: string;
   private readonly authHeader: string;
   private readonly modelProvider: string;
   private readonly modelId: string;
 
   constructor(options: OpencodeClientOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.authHeader = options.authHeader;
     this.modelProvider = options.modelProvider;
     this.modelId = options.modelId;
@@ -173,45 +175,42 @@ export class OpencodeClient {
   }
 
   // Watches a session for completed turns, delivering each one via onMessage
-  // as it happens. Meant to be started *alongside* send() (before it, or
-  // concurrently) rather than only after — confirmed live that a single
-  // send() call can internally produce several completed assistant turns
-  // with real user-facing text (a multi-step agentic loop) before its own
-  // HTTP response finally resolves; starting the watch only after send()
-  // returns would silently miss all but the last one. Because of that overlap,
-  // onMessage passes the message id so the caller can dedupe against send()'s
-  // own returned { messageId } — the two can observe the exact same turn.
-  // Opens one SSE connection for the duration of the watch (request-scoped:
-  // no registry, nothing survives past stop()/awaitIdle() resolving).
+  // as it happens. It is started before send() so a single prompt's internal
+  // multi-step loop cannot lose intermediate turns. The message id lets the
+  // caller dedupe the same turn observed by both the SSE stream and send().
+  // One request-scoped SSE watch is opened for each active exchange; the
+  // router-level AgentExchangeManager ensures concurrent prompts for one
+  // sender reuse that watch instead of creating duplicate deliveries.
   // Delivery fires on any completed assistant turn (any truthy `finish`, not
-  // just "stop" — confirmed live via an intermediate turn with
-  // finish: "tool-calls" carrying real user-facing text).
-  // Returns a Promise so the caller can be sure the SSE connection is
-  // actually live before proceeding to send() — otherwise an event for an
-  // early turn could fire and pass in the gap between this call returning
-  // and the underlying subscribe() handshake actually completing.
+  // just "stop").
   async watchSession(
     sessionId: string,
     onMessage: (messageId: string, text: string) => void,
   ): Promise<OpencodeSessionWatch> {
     const controller = new AbortController();
-    // messageId -> partId -> latest text (message.part.updated always carries
-    // the full current value, not a delta — confirmed live).
+    // messageId -> partId -> latest text. `message.part.updated` carries the
+    // full current value, not a delta.
     const partsByMessage = new Map<string, Map<string, string>>();
     let quietTimer: ReturnType<typeof setTimeout>;
+    let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
     let resolveIdle: () => void;
+    let resolveConnection!: () => void;
+    const connectionErrorState = { hadError: false, attempts: 0 };
+    let hasCompletedAssistantTurn = false;
+    let sessionBusy = false;
+    let backgroundWorkPending = false;
+    const connectionPromise = new Promise<void>((resolve) => {
+      resolveConnection = resolve;
+    });
     const idlePromise = new Promise<void>((resolve) => {
       resolveIdle = resolve;
     });
 
-    // controller.signal.aborted (not a plain boolean flag) doubles as the
-    // "have we settled" check throughout — settling always aborts, so there's
-    // one source of truth, and it also closes the SSE connection immediately
-    // instead of leaving it open until some later stop() call.
     const settle = (reason: string): void => {
       if (controller.signal.aborted) return;
       clearTimeout(quietTimer);
       clearTimeout(ceilingTimer);
+      clearTimeout(idleCandidateTimer);
       if (reason) log("watchSession", reason);
       controller.abort();
       resolveIdle();
@@ -221,58 +220,64 @@ export class OpencodeClient {
       settle("hit max wait ceiling");
     }, MAX_WAIT_MS);
 
-    // Settling depends on "nothing happened for this session in
-    // IDLE_GRACE_MS", not on a specific `session.idle` event — confirmed live
-    // that `session.idle` reliably fires *between* background-task rounds,
-    // but does not reliably fire again once a session has nothing left
-    // pending at all (a real run sat fully idle for 10+ minutes after its
-    // final answer with zero further events, `session.idle` included — so
-    // gating settle on that event alone would have meant every such exchange
-    // rides the full MAX_WAIT_MS ceiling instead of settling promptly).
-    // Reset on *any* event scoped to this session, started immediately so an
-    // already-quiet session (nothing pending at all) still settles.
     const resetQuietTimer = (): void => {
       clearTimeout(quietTimer);
       quietTimer = setTimeout(() => {
+        if (sessionBusy || backgroundWorkPending || !hasCompletedAssistantTurn) {
+          resetQuietTimer();
+          return;
+        }
         settle("quiet with no activity for the grace window");
       }, IDLE_GRACE_MS);
     };
+
+    const scheduleIdleSettle = (): void => {
+      if (sessionBusy || backgroundWorkPending || !hasCompletedAssistantTurn) return;
+      clearTimeout(idleCandidateTimer);
+      // Give the background-task plugin a short window to inject its status
+      // marker after an idle event. Plain one-turn exchanges then release
+      // their watcher promptly instead of waiting IDLE_GRACE_MS.
+      idleCandidateTimer = setTimeout(() => {
+        if (!sessionBusy && !backgroundWorkPending && hasCompletedAssistantTurn) {
+          settle("session idle");
+        }
+      }, 1_000);
+    };
+
     resetQuietTimer();
 
-    // event.subscribe() itself resolves as soon as the request is built
-    // (auth headers, URL) — confirmed by reading the SDK's own SSE client:
-    // the actual fetch is deferred into the returned async generator and
-    // only happens once it's first iterated, below. So awaiting this only
-    // guards against subscribe() failing to even construct the request (e.g.
-    // a bad auth header) — it does not confirm a live connection. Real
-    // connectivity issues surface once the loop below starts consuming.
-    //
-    // sseMaxRetryAttempts is set explicitly because the SDK's own default is
-    // unlimited retries with exponential backoff — against a genuinely
-    // unreachable opencode server that would retry forever, repeatedly
-    // hitting it. Bounded here instead; onSseError logs each attempt so a
-    // struggling server is visible rather than silently retried.
-    //
-    // Once retries are exhausted, the SDK's generator ends normally (a plain
-    // `break`, not a throw — confirmed by reading its source) — from this
-    // loop's perspective that is indistinguishable from a genuinely finished,
-    // quiet session, both landing in the same `finally { settle("") }` below.
-    // connectionErrorState makes that ambiguity visible in the log instead of
-    // silently treating a severed connection as "the agent is done". An
-    // object property, not a bare `let` — the same reasoning as `settle`'s
-    // own guard above: read from a different closure (the loop below) than
-    // the one that writes it (onSseError here), a bare boolean gets
-    // over-narrowed to its initial literal by the type checker.
-    const connectionErrorState = { hadError: false };
-    const { stream } = await this.client.event.subscribe({
-      signal: controller.signal,
-      sseMaxRetryAttempts: 3,
-      onSseError: (err) => {
-        connectionErrorState.hadError = true;
-        log("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
-      },
-    });
+    // The SDK's generated SSE client does not expose a reliable "connected"
+    // callback (its custom fetch option is ignored by the SSE implementation).
+    // Perform a short-lived header handshake first, then create the SDK stream.
+    // This guarantees the server is reachable before the prompt is submitted
+    // without leaving the handshake response open.
+    let subscribeResult: Awaited<ReturnType<SdkClient["event"]["subscribe"]>>;
+    try {
+      const handshakeController = new AbortController();
+      const response = await fetch(`${this.baseUrl}/event`, {
+        headers: this.authHeader ? { Authorization: this.authHeader } : undefined,
+        signal: handshakeController.signal,
+      });
+      if (!response.ok) throw new Error(`SSE failed: ${String(response.status)}`);
+      handshakeController.abort();
+      resolveConnection();
 
+      subscribeResult = await this.client.event.subscribe({
+        signal: controller.signal,
+        sseMaxRetryAttempts: 3,
+        onSseError: (err) => {
+          connectionErrorState.hadError = true;
+          connectionErrorState.attempts += 1;
+          log("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
+        },
+      });
+    } catch (err) {
+      settle("SSE subscription setup failed");
+      clearTimeout(ceilingTimer);
+      throw err;
+    }
+
+    const { stream } = subscribeResult;
     void (async () => {
       try {
         for await (const event of stream) {
@@ -282,29 +287,32 @@ export class OpencodeClient {
             case "message.part.updated": {
               const { part } = event.properties;
               if (part.sessionID !== sessionId) break;
-              // Any part scoped to this session counts as activity, even
-              // when it isn't text (e.g. a long-running tool call) — only
-              // text parts feed delivery, but non-text activity must still
-              // keep the quiet timer from elapsing mid-turn.
               relevant = true;
-              if (part.type !== "text") break;
+              if (part.type !== "text") sessionBusy = true;
               let byPart = partsByMessage.get(part.messageID);
               if (!byPart) {
                 byPart = new Map();
                 partsByMessage.set(part.messageID, byPart);
               }
-              byPart.set(part.id, part.text);
+              if (part.type === "text") byPart.set(part.id, part.text);
               break;
             }
             case "message.updated": {
               const { info } = event.properties;
               if (info.sessionID !== sessionId) break;
               relevant = true;
+              const byPart = partsByMessage.get(info.id);
+              const text = byPart ? joinTexts([...byPart.values()]) : "";
+              partsByMessage.delete(info.id);
+
+              if (info.role === "user" && text.includes("BACKGROUND TASK")) {
+                backgroundWorkPending = !text.includes("[ALL BACKGROUND TASKS COMPLETE]");
+              }
               if (info.role === "assistant" && info.finish) {
-                const byPart = partsByMessage.get(info.id);
-                partsByMessage.delete(info.id);
-                const text = byPart ? joinTexts([...byPart.values()]) : "";
-                if (text) onMessage(info.id, text);
+                hasCompletedAssistantTurn = true;
+                const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
+                if (reply) onMessage(info.id, reply);
+                scheduleIdleSettle();
               }
               break;
             }
@@ -312,6 +320,12 @@ export class OpencodeClient {
             case "session.status": {
               if (event.properties.sessionID !== sessionId) break;
               relevant = true;
+              if (event.type === "session.status") {
+                sessionBusy = event.properties.status.type !== "idle";
+              } else {
+                sessionBusy = false;
+              }
+              scheduleIdleSettle();
               break;
             }
             default:
@@ -330,9 +344,17 @@ export class OpencodeClient {
               "may not reflect the session actually being done",
           );
         }
-        settle("");
+        if (!controller.signal.aborted) settle("SSE stream ended");
       }
     })();
+
+    try {
+      await connectionPromise;
+    } catch (err) {
+      settle("SSE connection failed");
+      clearTimeout(ceilingTimer);
+      throw err;
+    }
 
     return {
       awaitIdle: () => idlePromise,

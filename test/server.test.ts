@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../src/config.js";
 import { MessageDedupe } from "../src/dedupe.js";
 import { OpencodeClient } from "../src/integrations/opencode.js";
+import { AgentExchangeManager } from "../src/router.js";
 import { RateLimiter } from "../src/rateLimit.js";
 import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
@@ -99,6 +100,7 @@ beforeEach(async () => {
       sessions: new SessionStore(config.sessionsFile),
       senderLock: new SenderLock(),
       typing: new TypingPresence(waha),
+      exchanges: new AgentExchangeManager(),
     },
   };
 

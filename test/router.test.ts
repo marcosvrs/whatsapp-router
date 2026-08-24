@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpencodeClient, type OpencodeMediaAttachment } from "../src/integrations/opencode.js";
-import { routeMessage, type RouterDeps } from "../src/router.js";
+import { AgentExchangeManager, routeMessage, type RouterDeps } from "../src/router.js";
 import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
 import type { WahaClientLike } from "../src/waha/client.js";
@@ -52,6 +52,7 @@ beforeEach(() => {
     sessions: new SessionStore(join(dir, "sessions.json")),
     senderLock: new SenderLock(),
     typing: new TypingPresence(waha),
+    exchanges: new AgentExchangeManager(),
   };
 });
 
@@ -514,5 +515,47 @@ describe("routeMessage — agent context", () => {
 
     expect(lastSentText()).toBe("got your location");
     expect(deps.sessions.get("111")).toBe("ses_new");
+  });
+  it("releases the sender lock after the prompt result while background watching continues", async () => {
+    deps.sessions.set("111", "ses_1");
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
+      awaitIdle: () => done,
+      stop: vi.fn(),
+    });
+    const sendSpy = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text) =>
+      Promise.resolve({
+        sessionId: "ses_1",
+        reply: text,
+        messageId: text,
+      }),
+    );
+
+    const first = routeMessage(deps, "111", CHAT_ID, "first");
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    });
+    const second = routeMessage(deps, "111", CHAT_ID, "second");
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(2);
+    });
+
+    release();
+    await Promise.all([first, second]);
+    expect(sendSpy).toHaveBeenNthCalledWith(
+      1,
+      "ses_1",
+      "first",
+      expect.objectContaining({ media: undefined }),
+    );
+    expect(sendSpy).toHaveBeenNthCalledWith(
+      2,
+      "ses_1",
+      "second",
+      expect.objectContaining({ media: undefined }),
+    );
   });
 });
