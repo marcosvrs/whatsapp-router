@@ -80,6 +80,6 @@ jobs:
           fi
 
           socketcli \
-            --target-path $GITHUB_WORKSPACE \
+            --target-path "$GITHUB_WORKSPACE" \
             --scm github \
-            --pr-number $PR_NUMBER
+            --pr-number "$PR_NUMBER"
