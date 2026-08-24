@@ -78,7 +78,10 @@ function changedMutationRanges() {
     if (!match || !isSourceFile(currentFile)) continue;
     const start = Number(match[1]);
     const count = Number(match[2] ?? "1");
-    if (count === 0) continue;
+    if (count === 0) {
+      deletedSource = true;
+      continue;
+    }
     const fileRanges = ranges.get(currentFile) ?? [];
     fileRanges.push({ start, end: start + count - 1 });
     ranges.set(currentFile, fileRanges);

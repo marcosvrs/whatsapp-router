@@ -372,6 +372,16 @@ export class OpencodeClient {
       }
       return lifecycle;
     };
+    const cancelChatIdle = (chatId: string): void => {
+      const lifecycle = getChatLifecycle(chatId);
+      clearTimeout(lifecycle.idleTimer);
+      lifecycle.idleTimer = undefined;
+    };
+    const rescheduleCompletedChatIdle = (): void => {
+      for (const destination of backgroundDestinations) {
+        scheduleChatIdle(destination.chatId);
+      }
+    };
     const scheduleChatIdle = (chatId: string): void => {
       const lifecycle = getChatLifecycle(chatId);
       if (lifecycle.activePrompts > 0 || lifecycle.backgroundPending || lifecycle.completedPrompts === 0) return;
@@ -495,6 +505,18 @@ export class OpencodeClient {
     };
 
 
+    const recoverMessageText = async (messageId: string): Promise<string> => {
+      try {
+        const result = await this.client.session.message({
+          path: { id: sessionId, messageID: messageId },
+        });
+        return result.data ? extractReplyText(result.data.parts) : "";
+      } catch (err) {
+        log("watchSession message recovery failed", err instanceof Error ? err.message : String(err));
+        return "";
+      }
+    };
+
     // event.subscribe() returns a lazy async stream. The current server emits
     // server.connected as its first event, and the SDK callback fires only
     // once the actual SSE request has produced an event.
@@ -539,6 +561,7 @@ export class OpencodeClient {
                 if (metadata) {
                   const text = joinTexts([...byPart.values()]);
                   if (processUserMessageState(properties.messageID, text, metadata.system)) {
+                    rescheduleCompletedChatIdle();
                     processedUserMessages.add(properties.messageID);
                     userMessageMetadata.delete(properties.messageID);
                     partsByMessage.delete(properties.messageID);
@@ -567,6 +590,7 @@ export class OpencodeClient {
                 if (metadata) {
                   const text = joinTexts([...byPart.values()]);
                   if (processUserMessageState(part.messageID, text, metadata.system)) {
+                    rescheduleCompletedChatIdle();
                     processedUserMessages.add(part.messageID);
                     userMessageMetadata.delete(part.messageID);
                     partsByMessage.delete(part.messageID);
@@ -587,17 +611,22 @@ export class OpencodeClient {
                     break;
                   }
                   const isRouterPrompt = info.system?.startsWith("You are being reached over WhatsApp.") === true;
+                  for (const destination of backgroundDestinations) {
+                    cancelChatIdle(destination.chatId);
+                  }
                   userMessageMetadata.set(info.id, { system: info.system });
                   if (isRouterPrompt) {
                     const pendingPrompt = pendingPrompts.shift();
                     const promptChatId = pendingPrompt?.chatId;
                     if (pendingPrompt) pendingPrompt.active = false;
                     if (promptChatId) {
+                      cancelChatIdle(promptChatId);
                       chatByMessage.set(info.id, promptChatId);
                       backgroundDestinations.push({ chatId: promptChatId, pending: false });
                     }
                   }
                   if (processUserMessageState(info.id, text, info.system)) {
+                    rescheduleCompletedChatIdle();
                     userMessageMetadata.delete(info.id);
                     partsByMessage.delete(info.id);
                   }
@@ -612,7 +641,9 @@ export class OpencodeClient {
                     markAssistantSeen(info.id);
                   if (info.finish !== "tool-calls") sessionBusy = false;
                     hasCompletedAssistantTurn = true;
-                    const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
+                    const reply = info.error
+                      ? `Agent error: ${errorMessage(info.error)}`
+                      : text || (await recoverMessageText(info.id));
                     if (reply) {
                       if (destinationChatId) onMessage(info.id, reply, destinationChatId);
                       else onMessage(info.id, reply);

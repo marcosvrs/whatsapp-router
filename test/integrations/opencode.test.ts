@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const sessionCreate = vi.fn();
 const sessionPrompt = vi.fn();
+const sessionMessage = vi.fn();
 const eventSubscribe = vi.fn();
 const createOpencodeClient = vi.fn(() => ({
-  session: { create: sessionCreate, prompt: sessionPrompt },
+  session: { create: sessionCreate, prompt: sessionPrompt, message: sessionMessage },
   event: { subscribe: eventSubscribe },
 }));
 
@@ -33,10 +34,11 @@ function fail(
 ): { data: undefined; error: unknown; response: { status: number } } {
   return { data: undefined, error, response: { status } };
 }
-
 beforeEach(() => {
   sessionCreate.mockReset();
   sessionPrompt.mockReset();
+  sessionMessage.mockReset();
+  sessionMessage.mockResolvedValue(ok({ info: {}, parts: [] }));
   eventSubscribe.mockReset();
   createOpencodeClient.mockClear();
 });
@@ -609,6 +611,16 @@ describe("OpencodeClient.watchSession", () => {
     watch.stop();
   });
 
+  it("accepts the SDK connection callback before the stream yields", async () => {
+    const source = fakeEventSource();
+    eventSubscribe.mockImplementation((options: { onSseEvent?: () => void }) => {
+      options.onSseEvent?.();
+      return { stream: source.stream };
+    });
+    const watch = await client().watchSession("ses_1", vi.fn());
+    watch.stop();
+  });
+
 
   it("routes completed turns to the prompt's originating chat", async () => {
     const source = fakeEventSource();
@@ -862,7 +874,7 @@ describe("OpencodeClient.watchSession", () => {
     const release = watch.acquirePrompt("chat1");
 
     first.end();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     release?.();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(eventSubscribe).toHaveBeenCalledTimes(1);
@@ -1098,6 +1110,21 @@ describe("OpencodeClient.watchSession", () => {
     source.push(sessionIdle("ses_1"));
     await vi.advanceTimersByTimeAsync(1_001);
     expect(resolved).toBe(true);
+    stop();
+  });
+
+  it("processes text from message.part.delta after user metadata arrives", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    source.push({ type: "message.updated", properties: { info: { id: "user_delta", sessionID: "ses_1", role: "user" } } });
+    source.push(partDelta("user_delta", "part_delta", "ses_1", "ordinary text"));
+    source.push(textPartUpdated("assistant_delta", "part_assistant", "ses_1", "reply"));
+    source.push(assistantFinished("assistant_delta", "ses_1"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_delta", "reply");
+    });
     stop();
   });
 
@@ -1348,6 +1375,89 @@ describe("OpencodeClient.watchSession", () => {
     watch.stop();
   });
 
+  it("does not end per-chat typing before delayed marker parts arrive", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_chat1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("user_chat1", "part_user", "ses_1", "start background"));
+    await vi.advanceTimersByTimeAsync(0);
+    watch.markPromptCompleted("chat1");
+    release?.();
+
+    let done = false;
+    const idle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    void idle.then(() => {
+      done = true;
+    });
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(done).toBe(false);
+
+    source.push(
+      textPartUpdated("marker_chat1", "part_marker", "ses_1", "[BACKGROUND TASK RESULT READY] still working"),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("complete_chat1", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(done).toBe(true);
+    watch.stop();
+  });
+
+  it("rearms per-chat idle after an ordinary user message is classified", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_chat1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("user_chat1", "part_user", "ses_1", "ordinary prompt"));
+    await vi.advanceTimersByTimeAsync(0);
+    watch.markPromptCompleted("chat1");
+    release?.();
+
+    let done = false;
+    const idle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    void idle.then(() => {
+      done = true;
+    });
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "ordinary_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("ordinary_chat1", "part_ordinary", "ses_1", "ordinary text"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(done).toBe(true);
+    watch.stop();
+  });
+
   it("resolves pending chat and turn waiters when the watcher stops", async () => {
     const source = fakeEventSource();
     connectSource(source);
@@ -1526,6 +1636,57 @@ describe("OpencodeClient.watchSession", () => {
     await vi.waitFor(() => {
       expect(onMessage).toHaveBeenCalledWith("msg_1", "Agent error: failed");
     });
+    stop();
+  });
+
+  it("recovers text parts from the message endpoint after SSE reconnect", async () => {
+    sessionMessage.mockResolvedValue(
+      ok({ info: { id: "msg_1", sessionID: "ses_1", role: "assistant" }, parts: [{ type: "text", text: "recovered" }] }),
+    );
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    source.push(assistantFinished("msg_1", "ses_1"));
+
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("msg_1", "recovered");
+    });
+    expect(sessionMessage).toHaveBeenCalledWith({ path: { id: "ses_1", messageID: "msg_1" } });
+    stop();
+  });
+
+  it("does not deliver when message recovery returns no data", async () => {
+    sessionMessage.mockResolvedValue({ data: undefined, error: new Error("not found"), response: { status: 404 } });
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    source.push(assistantFinished("msg_1", "ses_1"));
+
+    await vi.waitFor(() => {
+      expect(sessionMessage).toHaveBeenCalled();
+    });
+    expect(onMessage).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("does not deliver an unrecoverable completed message", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    sessionMessage.mockRejectedValue(new Error("message fetch down"));
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    source.push(assistantFinished("msg_1", "ses_1"));
+
+    await vi.waitFor(() => {
+      expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+        "watchSession message recovery failed",
+        "message fetch down",
+      ]);
+    });
+    expect(onMessage).not.toHaveBeenCalled();
     stop();
   });
 
