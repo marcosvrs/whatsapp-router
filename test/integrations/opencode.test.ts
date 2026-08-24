@@ -15,6 +15,7 @@ const {
   OpencodeSendError,
   IDLE_GRACE_MS,
   MAX_WAIT_MS,
+  TURN_RECONCILE_MS,
   SSE_CONNECT_TIMEOUT_MS,
   backgroundWorkState,
   errorMessage,
@@ -1201,6 +1202,260 @@ describe("OpencodeClient.watchSession", () => {
     await vi.advanceTimersByTimeAsync(1_001);
     expect(resolved).toBe(true);
     stop();
+  });
+
+  it("ends typing per chat while another chat keeps background work active", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const releaseChat1 = watch.acquirePrompt("chat1");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_chat1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("user_chat1", "part_user", "ses_1", "start background"));
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(
+      textPartUpdated("marker_chat1", "part_marker", "ses_1", "[BACKGROUND TASK RESULT READY] still working"),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    const chat1Idle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    let chat1Done = false;
+    void chat1Idle.then(() => {
+      chat1Done = true;
+    });
+    watch.markPromptCompleted("chat1");
+    releaseChat1?.();
+
+    const releaseChat2 = watch.acquirePrompt("chat2");
+    const chat2Idle = watch.awaitChatIdle?.("chat2") ?? Promise.resolve();
+    let chat2Done = false;
+    void chat2Idle.then(() => {
+      chat2Done = true;
+    });
+    watch.markPromptCompleted("chat2");
+    releaseChat2?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(chat2Done).toBe(true);
+    expect(chat1Done).toBe(false);
+
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("complete_chat1", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(chat1Done).toBe(true);
+    watch.stop();
+  });
+  it("keeps another chat's pending marker from blocking completed chat work", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release1 = watch.acquirePrompt("chat1");
+    const release2 = watch.acquirePrompt("chat2");
+    for (const [chatId, userId, markerId] of [
+      ["chat1", "user_chat1", "marker_chat1"],
+      ["chat2", "user_chat2", "marker_chat2"],
+    ] as const) {
+      source.push({
+        type: "message.updated",
+        properties: {
+          info: {
+            id: userId,
+            sessionID: "ses_1",
+            role: "user",
+            system: "You are being reached over WhatsApp.",
+          },
+        },
+      });
+      source.push(textPartUpdated(userId, `part_${chatId}`, "ses_1", `start ${chatId}`));
+      source.push({
+        type: "message.updated",
+        properties: { info: { id: markerId, sessionID: "ses_1", role: "user" } },
+      });
+      source.push(
+        textPartUpdated(markerId, `marker_${chatId}`, "ses_1", "[BACKGROUND TASK RESULT READY] still working"),
+      );
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("complete_chat1", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const chat1Idle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    let chat1Done = false;
+    void chat1Idle.then(() => {
+      chat1Done = true;
+    });
+    watch.markPromptCompleted("chat1");
+    release1?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(chat1Done).toBe(true);
+
+    release2?.();
+    watch.stop();
+  });
+
+  it("cancels a per-chat idle timer when background work starts", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+    const idle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    let done = false;
+    void idle.then(() => {
+      done = true;
+    });
+    watch.markPromptCompleted("chat1");
+    release?.();
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_chat1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("user_chat1", "part_user", "ses_1", "start background"));
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(
+      textPartUpdated("marker_chat1", "part_marker", "ses_1", "[BACKGROUND TASK RESULT READY] still working"),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(done).toBe(false);
+    watch.stop();
+  });
+
+  it("resolves pending chat and turn waiters when the watcher stops", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const chatIdle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    source.push(assistantFinished("old_turn", "ses_1"));
+    await vi.advanceTimersByTimeAsync(0);
+    const turn = watch.awaitTurn?.("missing_turn") ?? Promise.resolve();
+
+    watch.stop();
+    await watch.awaitChatIdle?.("after-stop");
+    await Promise.all([chatIdle, turn]);
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("resolves a turn waiter when its SSE completion arrives", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    source.push(assistantFinished("old_turn", "ses_1"));
+    await vi.advanceTimersByTimeAsync(0);
+    const turn = watch.awaitTurn?.("target_turn") ?? Promise.resolve();
+    source.push(assistantFinished("target_turn", "ses_1"));
+    await turn;
+    let alreadySeen = false;
+    void (watch.awaitTurn?.("target_turn") ?? Promise.resolve()).then(() => {
+      alreadySeen = true;
+    });
+    await Promise.resolve();
+    expect(alreadySeen).toBe(true);
+    watch.stop();
+    let afterStop = false;
+    void (watch.awaitTurn?.("after_stop") ?? Promise.resolve()).then(() => {
+      afterStop = true;
+    });
+    await Promise.resolve();
+    expect(afterStop).toBe(true);
+  });
+  it("waits briefly for stream activity before releasing an authoritative turn", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "streaming", sessionID: "ses_1", role: "assistant" } },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    let resolved = false;
+    const wait = watch.awaitTurn?.("missing_turn") ?? Promise.resolve();
+    void wait.then(() => {
+      resolved = true;
+    });
+    await vi.advanceTimersByTimeAsync(TURN_RECONCILE_MS - 1);
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(resolved).toBe(true);
+    watch.stop();
+  });
+  it("does not delay an authoritative turn before any SSE assistant activity", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    let resolved = false;
+    void (watch.awaitTurn?.("before_activity") ?? Promise.resolve()).then(() => {
+      resolved = true;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(true);
+    watch.stop();
+  });
+
+  it("resolves a single prompt-specific idle waiter after its prompt completes", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+    const idle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    let resolved = false;
+    void idle.then(() => {
+      resolved = true;
+    });
+    watch.markPromptCompleted("chat1");
+    release?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
+    watch.stop();
+  });
+
+  it("keeps a chat idle wait pending while another prompt remains active", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const firstRelease = watch.acquirePrompt("chat1");
+    const secondRelease = watch.acquirePrompt("chat1");
+    const idle = watch.awaitChatIdle?.("chat1") ?? Promise.resolve();
+    let resolved = false;
+    void idle.then(() => {
+      resolved = true;
+    });
+    watch.markPromptCompleted("chat1");
+    watch.markPromptCompleted("chat1");
+    firstRelease?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(false);
+    secondRelease?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
+    watch.stop();
   });
 
 

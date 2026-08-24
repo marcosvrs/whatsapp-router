@@ -85,7 +85,9 @@ export interface ActiveAgentExchange {
   readonly sessionId: string;
   readonly done: Promise<void>;
   acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
-  markPromptCompleted: () => void;
+  awaitChatIdle?: (chatId: string) => Promise<void>;
+  awaitTurn?: (messageId: string) => Promise<void>;
+  markPromptCompleted: (chatId?: string) => void;
   deliver: (messageId: string, text: string, chatId: string) => void;
   stop: () => void;
 }
@@ -158,8 +160,10 @@ export class AgentExchangeManager {
       sessionId,
       done,
       acquirePrompt: (nextChatId) => watch.acquirePrompt(nextChatId),
-      markPromptCompleted: () => {
-        watch.markPromptCompleted();
+      awaitChatIdle: watch.awaitChatIdle,
+      awaitTurn: watch.awaitTurn,
+      markPromptCompleted: (nextChatId) => {
+        watch.markPromptCompleted(nextChatId);
       },
       deliver: (messageId, text, destinationChatId) => {
         enqueueDelivery(messageId, text, destinationChatId);
@@ -248,9 +252,9 @@ async function handleAgent(
         endTyping = () => deps.typing.end(chatId);
         const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
         exchange = acquired.exchange;
-        if (acquired.created) {
-          waitForExchange = acquired.exchange.done;
-        }
+        waitForExchange =
+          acquired.exchange.awaitChatIdle?.(chatId) ??
+          (acquired.created ? acquired.exchange.done : Promise.resolve());
         releasePrompt = acquired.release;
 
         const replaceExchange = async (nextSessionId: string): Promise<void> => {
@@ -259,7 +263,7 @@ async function handleAgent(
           deps.sessions.set(senderKey, nextSessionId);
           const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
           exchange = replacement.exchange;
-          waitForExchange = replacement.exchange.done;
+          waitForExchange = replacement.exchange.awaitChatIdle?.(chatId) ?? replacement.exchange.done;
           releasePrompt = replacement.release;
         };
         let result: OpencodeSendResult;
@@ -276,7 +280,8 @@ async function handleAgent(
         if (result.sessionId !== exchange.sessionId) {
           await replaceExchange(result.sessionId);
         }
-        exchange.markPromptCompleted();
+        exchange.markPromptCompleted(chatId);
+        await exchange.awaitTurn?.(result.messageId);
         exchange.deliver(result.messageId, result.reply, chatId);
       } finally {
         releasePrompt();

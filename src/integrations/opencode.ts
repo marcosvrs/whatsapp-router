@@ -100,6 +100,14 @@ export function isMessagePartDeltaEvent(event: unknown): event is MessagePartDel
     typeof properties.delta === "string"
   );
 }
+interface ChatLifecycle {
+  activePrompts: number;
+  completedPrompts: number;
+  backgroundPending: boolean;
+  idleTimer?: ReturnType<typeof setTimeout>;
+  waiters: Set<() => void>;
+}
+
 
 const BACKGROUND_TASK_PROGRESS_MARKERS = [
   "[BACKGROUND TASK RESULT READY]",
@@ -141,6 +149,7 @@ export const SSE_CONNECT_TIMEOUT_MS = 30_000;
 // getting watched for as long as it keeps producing activity, with no
 // artificial duration cap.
 export const IDLE_GRACE_MS = 4 * 60_000;
+export const TURN_RECONCILE_MS = 100;
 // A true backstop, not a normal-operation cutoff — only fires if a session
 // somehow produces zero activity of any kind (no idle, no status, nothing)
 // for this entire span, which the quiet timer above would already have
@@ -157,12 +166,14 @@ export interface OpencodeSessionWatch {
   // `this` binding, and method shorthand makes eslint's unbound-method rule
   // flag them as unsafe to destructure even though they aren't.
   awaitIdle: () => Promise<void>;
+  awaitChatIdle?: (chatId: string) => Promise<void>;
+  awaitTurn?: (messageId: string) => Promise<void>;
   // Holds the watcher open while a prompt's HTTP request is in flight.
   // Returns undefined when the watcher has already settled.
   acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
   // Marks the prompt HTTP result as a completed assistant turn even if SSE
   // missed its completion event.
-  markPromptCompleted: () => void;
+  markPromptCompleted: (chatId?: string) => void;
   stop: () => void;
 }
 
@@ -277,6 +288,10 @@ export class OpencodeClient {
     const userMessageMetadata = new Map<string, { system?: string }>();
     const processedUserMessages = new Set<string>();
     const backgroundDestinations: { chatId: string; pending: boolean }[] = [];
+    const chatLifecycles = new Map<string, ChatLifecycle>();
+    const seenAssistantMessages = new Set<string>();
+    let assistantStreamActivity = false;
+    const turnWaiters = new Map<string, Set<() => void>>();
     let unassignedBackgroundPending = false;
     let quietTimer: ReturnType<typeof setTimeout>;
     let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -307,6 +322,15 @@ export class OpencodeClient {
       clearTimeout(reconnectTimer);
       connectionTimer = undefined;
       reconnectTimer = undefined;
+      for (const lifecycle of chatLifecycles.values()) {
+        clearTimeout(lifecycle.idleTimer);
+        for (const resolve of lifecycle.waiters) resolve();
+        lifecycle.waiters.clear();
+      }
+      for (const waiters of turnWaiters.values()) {
+        for (const resolve of waiters) resolve();
+      }
+      turnWaiters.clear();
       if (reason) log("watchSession", reason);
       controller.abort();
       resolveIdle();
@@ -340,6 +364,64 @@ export class OpencodeClient {
       }, 1_000);
     };
 
+    const getChatLifecycle = (chatId: string): ChatLifecycle => {
+      let lifecycle = chatLifecycles.get(chatId);
+      if (!lifecycle) {
+        lifecycle = { activePrompts: 0, completedPrompts: 0, backgroundPending: false, waiters: new Set() };
+        chatLifecycles.set(chatId, lifecycle);
+      }
+      return lifecycle;
+    };
+    const scheduleChatIdle = (chatId: string): void => {
+      const lifecycle = getChatLifecycle(chatId);
+      if (lifecycle.activePrompts > 0 || lifecycle.backgroundPending || lifecycle.completedPrompts === 0) return;
+      clearTimeout(lifecycle.idleTimer);
+      lifecycle.idleTimer = setTimeout(() => {
+        lifecycle.idleTimer = undefined;
+        lifecycle.completedPrompts = 0;
+        const waiters = [...lifecycle.waiters];
+        lifecycle.waiters.clear();
+        for (const resolve of waiters) resolve();
+      }, 1_000);
+    };
+    const refreshChatBackground = (chatId: string): void => {
+      const lifecycle = getChatLifecycle(chatId);
+      lifecycle.backgroundPending = backgroundDestinations.some(
+        (destination) => destination.chatId === chatId && destination.pending,
+      );
+      if (lifecycle.backgroundPending) clearTimeout(lifecycle.idleTimer);
+      else scheduleChatIdle(chatId);
+    };
+    const awaitChatIdle = (chatId: string): Promise<void> => {
+      if (controller.signal.aborted) return Promise.resolve();
+      const lifecycle = getChatLifecycle(chatId);
+      return new Promise((resolve) => {
+        lifecycle.waiters.add(resolve);
+        scheduleChatIdle(chatId);
+      });
+    };
+    const awaitTurn = (messageId: string): Promise<void> => {
+      if (controller.signal.aborted || seenAssistantMessages.has(messageId) || !assistantStreamActivity) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        const waiters = turnWaiters.get(messageId) ?? new Set<() => void>();
+        waiters.add(resolve);
+        turnWaiters.set(messageId, waiters);
+        setTimeout(() => {
+          waiters.delete(resolve);
+          if (waiters.size === 0) turnWaiters.delete(messageId);
+          resolve();
+        }, TURN_RECONCILE_MS);
+      });
+    };
+    const markAssistantSeen = (messageId: string): void => {
+      seenAssistantMessages.add(messageId);
+      const waiters = turnWaiters.get(messageId);
+      if (!waiters) return;
+      turnWaiters.delete(messageId);
+      for (const resolve of waiters) resolve();
+    };
     const hasTrackedWork = (): boolean => sessionBusy || backgroundWorkPending || promptLeases > 0;
     const reconnect = async (): Promise<void> => {
       if (controller.signal.aborted || !hasTrackedWork()) return;
@@ -389,6 +471,7 @@ export class OpencodeClient {
           if (destination) {
             destination.pending = true;
             chatByMessage.set(messageId, destination.chatId);
+            refreshChatBackground(destination.chatId);
             unassignedBackgroundPending = false;
           } else {
             unassignedBackgroundPending = true;
@@ -399,6 +482,7 @@ export class OpencodeClient {
             destination.pending = false;
             chatByMessage.set(messageId, destination.chatId);
             backgroundDestinations.splice(backgroundDestinations.indexOf(destination), 1);
+            refreshChatBackground(destination.chatId);
           } else {
             unassignedBackgroundPending = false;
           }
@@ -521,9 +605,11 @@ export class OpencodeClient {
                   partsByMessage.delete(info.id);
                 }
                 if (info.role === "assistant") {
+                  assistantStreamActivity = true;
                   const destinationChatId = info.parentID ? chatByMessage.get(info.parentID) : undefined;
                   if (destinationChatId) chatByMessage.set(info.id, destinationChatId);
                   if (info.finish) {
+                    markAssistantSeen(info.id);
                   if (info.finish !== "tool-calls") sessionBusy = false;
                     hasCompletedAssistantTurn = true;
                     const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
@@ -599,6 +685,10 @@ export class OpencodeClient {
     const acquirePrompt = (chatId: string): ((cancel?: boolean) => void) | undefined => {
       if (controller.signal.aborted) return undefined;
       const pendingPrompt = { chatId, active: true };
+      const lifecycle = getChatLifecycle(chatId);
+      assistantStreamActivity = false;
+      lifecycle.activePrompts += 1;
+      clearTimeout(lifecycle.idleTimer);
       pendingPrompts.push(pendingPrompt);
       promptLeases += 1;
       clearTimeout(idleCandidateTimer);
@@ -613,21 +703,30 @@ export class OpencodeClient {
           pendingPrompt.active = false;
         }
         promptLeases -= 1;
+        lifecycle.activePrompts = Math.max(0, lifecycle.activePrompts - 1);
+        scheduleChatIdle(chatId);
         if (controller.signal.aborted) return;
         scheduleIdleSettle();
         resetQuietTimer();
       };
     };
-    const markPromptCompleted = (): void => {
+    const markPromptCompleted = (chatId?: string): void => {
       if (controller.signal.aborted) return;
       hasCompletedAssistantTurn = true;
       sessionBusy = false;
+      if (chatId) {
+        const lifecycle = getChatLifecycle(chatId);
+        lifecycle.completedPrompts += 1;
+        scheduleChatIdle(chatId);
+      }
       scheduleIdleSettle();
       resetQuietTimer();
     };
 
     return {
       awaitIdle: () => idlePromise,
+      awaitChatIdle,
+      awaitTurn,
       acquirePrompt,
       markPromptCompleted,
       stop: () => {
