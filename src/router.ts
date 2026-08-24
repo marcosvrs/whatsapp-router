@@ -129,7 +129,7 @@ export class AgentExchangeManager {
       }
       const delivery: PendingDelivery = { text, chatId: destinationChatId };
       inFlight.set(messageId, delivery);
-      void deliver(deps, destinationChatId, text)
+      void deliver(deps, destinationChatId, text, messageId)
         .then(() => {
           inFlight.delete(messageId);
           delivered.add(messageId);
@@ -188,8 +188,8 @@ export class AgentExchangeManager {
 
 // The agent's own reply is LLM-generated Markdown — WhatsApp uses a
 // different, much smaller formatting syntax (see markdownToWhatsapp.ts).
-function deliver(deps: RouterDeps, chatId: string, text: string): Promise<void> {
-  return deps.typing.send(chatId, markdownToWhatsapp(text));
+function deliver(deps: RouterDeps, chatId: string, text: string, messageId: string): Promise<void> {
+  return deps.typing.send(chatId, markdownToWhatsapp(text), messageId);
 }
 
 // watchSession() only rejects on a narrow failure — event.subscribe() unable

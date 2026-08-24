@@ -67,7 +67,7 @@ export class TypingPresence {
       });
   }
 
-  send(chatId: string, text: string): Promise<void> {
+  send(chatId: string, text: string, id?: string): Promise<void> {
     return this.perChat.run(chatId, async () => {
       this.pauseInterval(chatId);
       // Presence cleanup is best-effort. A transient WAHA failure must never
@@ -78,7 +78,8 @@ export class TypingPresence {
           log("stopTyping failed", err instanceof Error ? err.message : String(err));
         },
       );
-      await this.waha.sendText(chatId, text);
+      if (id) await this.waha.sendText(chatId, text, id);
+      else await this.waha.sendText(chatId, text);
       if ((this.activeCount.get(chatId) ?? 0) > 0) {
         await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal)).catch(
           logStartTypingFailure,

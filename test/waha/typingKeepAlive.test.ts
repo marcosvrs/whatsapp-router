@@ -152,10 +152,10 @@ describe("TypingPresence", () => {
     typing.begin("chat1");
     await vi.advanceTimersByTimeAsync(0); // let begin()'s deferred startTyping settle first
     calls.length = 0; // discard begin()'s own startTyping call
-    await typing.send("chat1", "hello");
+    await typing.send("chat1", "hello", "msg_1");
 
     expect(calls).toEqual(["stop", "send", "start"]);
-    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", "msg_1");
   });
 
   it("resumes the refresh interval after a send while still active", async () => {

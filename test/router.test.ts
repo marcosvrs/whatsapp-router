@@ -773,8 +773,8 @@ describe("routeMessage — agent context", () => {
     acquired.exchange.deliver("msg_1", "reply", "chat1");
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(2);
-      expect(send).toHaveBeenNthCalledWith(1, "chat1", "reply");
-      expect(send).toHaveBeenNthCalledWith(2, "chat1", "reply");
+      expect(send).toHaveBeenNthCalledWith(1, "chat1", "reply", "msg_1");
+      expect(send).toHaveBeenNthCalledWith(2, "chat1", "reply", "msg_1");
     });
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "failed to deliver agent turn",

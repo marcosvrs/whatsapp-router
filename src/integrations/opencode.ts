@@ -313,11 +313,15 @@ export class OpencodeClient {
     const idlePromise = new Promise<void>((resolve) => {
       resolveIdle = resolve;
     });
+    const clearIdleCandidate = (): void => {
+      clearTimeout(idleCandidateTimer);
+      idleCandidateTimer = undefined;
+    };
     const settle = (reason: string): void => {
       if (controller.signal.aborted) return;
       clearTimeout(quietTimer);
       clearTimeout(ceilingTimer);
-      clearTimeout(idleCandidateTimer);
+      clearIdleCandidate();
       clearTimeout(connectionTimer);
       clearTimeout(reconnectTimer);
       connectionTimer = undefined;
@@ -353,11 +357,12 @@ export class OpencodeClient {
 
     const scheduleIdleSettle = (): void => {
       if (sessionBusy || backgroundWorkPending || promptLeases > 0 || !hasCompletedAssistantTurn) return;
-      clearTimeout(idleCandidateTimer);
+      clearIdleCandidate();
       // Give the background-task plugin a short window to inject its status
       // marker after an idle event. Plain one-turn exchanges then release
       // their watcher promptly instead of waiting IDLE_GRACE_MS.
       idleCandidateTimer = setTimeout(() => {
+        idleCandidateTimer = undefined;
         if (!sessionBusy && !backgroundWorkPending && promptLeases === 0 && hasCompletedAssistantTurn) {
           settle("session idle");
         }
@@ -432,25 +437,27 @@ export class OpencodeClient {
       turnWaiters.delete(messageId);
       for (const resolve of waiters) resolve();
     };
-    const hasTrackedWork = (): boolean => sessionBusy || backgroundWorkPending || promptLeases > 0;
+    const hasTrackedWork = (): boolean =>
+      sessionBusy || backgroundWorkPending || promptLeases > 0 || idleCandidateTimer !== undefined;
     const reconnect = async (): Promise<void> => {
       if (controller.signal.aborted || !hasTrackedWork()) return;
       connectionErrorState.hadError = false;
       connectionErrorState.attempts = 0;
       try {
         const { stream } = await subscribe();
+        scheduleIdleSettle();
         await consume(stream);
       } catch (err) {
         log("watchSession reconnect failed, retrying", err instanceof Error ? err.message : String(err));
         scheduleReconnect();
       }
     };
-    const scheduleReconnect = (): void => {
+    const scheduleReconnect = (delay = 1_000): void => {
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
         void reconnect();
-      }, 1_000);
+      }, delay);
     };
 
     resetQuietTimer();
@@ -545,7 +552,7 @@ export class OpencodeClient {
           if (isMessagePartDeltaEvent(rawEvent)) {
             const { properties } = rawEvent;
             if (properties.sessionID === sessionId) {
-              clearTimeout(idleCandidateTimer);
+              clearIdleCandidate();
               relevant = true;
               if (properties.field === "text") {
                 let byPart = partsByMessage.get(properties.messageID);
@@ -577,7 +584,7 @@ export class OpencodeClient {
               case "message.part.updated": {
                 const { part } = typedEvent.properties;
                 if (part.sessionID !== sessionId) break;
-                clearTimeout(idleCandidateTimer);
+                clearIdleCandidate();
                 relevant = true;
                 if (part.type !== "text") sessionBusy = true;
                 let byPart = partsByMessage.get(part.messageID);
@@ -601,7 +608,7 @@ export class OpencodeClient {
               case "message.updated": {
                 const { info } = typedEvent.properties;
                 if (info.sessionID !== sessionId) break;
-                clearTimeout(idleCandidateTimer);
+                clearIdleCandidate();
                 relevant = true;
                 const byPart = partsByMessage.get(info.id);
                 const text = byPart ? joinTexts([...byPart.values()]) : "";
@@ -656,7 +663,7 @@ export class OpencodeClient {
               case "session.idle":
               case "session.status": {
                 if (typedEvent.properties.sessionID !== sessionId) break;
-                clearTimeout(idleCandidateTimer);
+                clearIdleCandidate();
                 relevant = true;
                 if (typedEvent.type === "session.status") {
                   sessionBusy = typedEvent.properties.status.type !== "idle";
@@ -686,7 +693,7 @@ export class OpencodeClient {
         }
         if (!controller.signal.aborted) {
           if (hasTrackedWork()) {
-            scheduleReconnect();
+            scheduleReconnect(idleCandidateTimer !== undefined ? 0 : undefined);
           } else {
             settle("SSE stream ended");
           }
@@ -722,7 +729,7 @@ export class OpencodeClient {
       clearTimeout(lifecycle.idleTimer);
       pendingPrompts.push(pendingPrompt);
       promptLeases += 1;
-      clearTimeout(idleCandidateTimer);
+      clearIdleCandidate();
       resetQuietTimer();
       let released = false;
       return (cancel = false) => {

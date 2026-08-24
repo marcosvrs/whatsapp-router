@@ -835,10 +835,61 @@ describe("OpencodeClient.watchSession", () => {
 
     release?.();
     second.end();
+    await vi.advanceTimersByTimeAsync(1_001);
     await watch.awaitIdle();
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).not.toContainEqual([
       "watchSession stream ended after connection retries were exhausted — may not reflect the session actually being done",
     ]);
+  });
+
+  it("reconnects during post-prompt grace before a detached-work marker", async () => {
+    const first = fakeEventSource();
+    const second = fakeEventSource();
+    eventSubscribe
+      .mockImplementationOnce(() => {
+        first.push({ type: "server.connected", properties: {} });
+        return { stream: first.stream };
+      })
+      .mockImplementationOnce(() => {
+        second.push({ type: "server.connected", properties: {} });
+        return { stream: second.stream };
+      });
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+    const release = watch.acquirePrompt("chat1");
+    first.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_chat1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    first.push(textPartUpdated("user_chat1", "part_user", "ses_1", "start background"));
+    await vi.advanceTimersByTimeAsync(0);
+    watch.markPromptCompleted("chat1");
+    release?.();
+
+    first.end();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(eventSubscribe).toHaveBeenCalledTimes(2);
+
+    second.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_chat1", sessionID: "ses_1", role: "user" } },
+    });
+    second.push(
+      textPartUpdated("marker_chat1", "part_marker", "ses_1", "[BACKGROUND TASK RESULT READY] still working"),
+    );
+    second.push(textPartUpdated("assistant_chat1", "part_assistant", "ses_1", "detached result"));
+    second.push(assistantFinished("assistant_chat1", "ses_1", "stop", "marker_chat1"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_chat1", "detached result", "chat1");
+    });
+    watch.stop();
   });
 
   it("retries a reconnect failure while tracked work remains", async () => {
