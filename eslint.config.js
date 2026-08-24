@@ -7,7 +7,14 @@ import tseslint from "typescript-eslint";
 const tsconfigRootDir = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(
-  globalIgnores(["dist/**", "coverage/**", "node_modules/**", "reports/**", ".stryker-tmp/**"]),
+  globalIgnores([
+    "dist/**",
+    "coverage/**",
+    "node_modules/**",
+    "reports/**",
+    ".stryker-tmp/**",
+    "scripts/verify-thresholds.mjs",
+  ]),
   js.configs.recommended,
   tseslint.configs.strictTypeChecked,
   tseslint.configs.stylisticTypeChecked,

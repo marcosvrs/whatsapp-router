@@ -9,5 +9,7 @@ if [ -n "$staged_ts" ]; then
   git add -- $staged_ts
 fi
 
+npm run test:thresholds:changed -- --staged
+
 git diff --cached --check
 gitleaks protect --staged --redact

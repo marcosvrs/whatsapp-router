@@ -78,3 +78,6 @@ jobs:
           else
             npm exec --offline -- vitest run --changed "$base_sha"
           fi
+
+      - name: Verify changed thresholds
+        run: npm run test:thresholds:changed -- --base "$(git merge-base origin/main "$GITHUB_SHA")"

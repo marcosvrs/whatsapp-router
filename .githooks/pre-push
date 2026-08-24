@@ -37,6 +37,8 @@ else
   npm exec --offline -- vitest run --changed "$base_sha"
 fi
 
+npm run test:thresholds:changed -- --base "$base_sha"
+
 if [ "$needs_build" = true ]; then
   npm run build
 fi
