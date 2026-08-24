@@ -1,0 +1,54 @@
+name: NPM Audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  npm-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - name: Pin npm policy toolchain
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Verify npm security policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(npm config get min-release-age)" = "3"
+          test "$(npm config get ignore-scripts)" = "true"
+          test "$(npm config get allow-git)" = "none"
+          test "$(npm config get allow-remote)" = "none"
+          test "$(npm config get allow-file)" = "none"
+          test "$(npm config get allow-directory)" = "none"
+          test "$(npm config get strict-peer-deps)" = "true"
+          test "$(npm config get engine-strict)" = "true"
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Audit known vulnerabilities
+        run: npm audit --audit-level=moderate
+
+      - name: Verify registry signatures and attestations
+        run: npm audit signatures
