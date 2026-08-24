@@ -170,6 +170,7 @@ if (full) {
 
 const changed = changedFiles();
 const sourceChanges = changed.filter(isSourceFile);
+const testChanges = changed.some((file) => file.startsWith("test/"));
 const { ranges: mutationRanges, deletedSource } = changedMutationRanges();
 const forceFull = deletedSource || changed.some(requiresFullVerification);
 
@@ -180,7 +181,11 @@ if (forceFull) {
 
 const sourceFiles = sourceChanges.filter((file) => existsSync(file) && file !== "src/index.ts");
 if (sourceFiles.length === 0) {
-  console.log("No changed production TypeScript files; threshold checks are not required.");
+  if (testChanges) {
+    runSelected(undefined, undefined);
+  } else {
+    console.log("No changed production TypeScript files; threshold checks are not required.");
+  }
   process.exit(0);
 }
 

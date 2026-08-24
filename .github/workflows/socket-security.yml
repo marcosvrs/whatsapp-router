@@ -21,7 +21,12 @@ on:
 
 # Prevent concurrent runs for the same commit
 concurrency:
-  group: socket-scan-${{ github.ref }}-${{ github.sha }}
+  group: >-
+    socket-scan-${{
+      github.event_name == 'issue_comment' &&
+      format('issue-{0}', github.event.issue.number) ||
+      github.ref
+    }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:

@@ -232,6 +232,7 @@ async function handleAgent(
   }
 
   let exchange!: ActiveAgentExchange;
+  let waitForExchange: Promise<void> = Promise.resolve();
   let endTyping: () => Promise<void> = () => Promise.resolve();
   try {
     await deps.senderLock.run(senderKey, async () => {
@@ -247,6 +248,9 @@ async function handleAgent(
         endTyping = () => deps.typing.end(chatId);
         const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
         exchange = acquired.exchange;
+        if (acquired.created) {
+          waitForExchange = acquired.exchange.done;
+        }
         releasePrompt = acquired.release;
 
         const replaceExchange = async (nextSessionId: string): Promise<void> => {
@@ -255,6 +259,7 @@ async function handleAgent(
           deps.sessions.set(senderKey, nextSessionId);
           const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
           exchange = replacement.exchange;
+          waitForExchange = replacement.exchange.done;
           releasePrompt = replacement.release;
         };
         let result: OpencodeSendResult;
@@ -281,7 +286,7 @@ async function handleAgent(
     // This wait is deliberately outside senderLock.run(). A background task
     // may keep typing alive for minutes, but a new inbound message must still
     // be allowed to acquire the sender's prompt lock.
-    await exchange.done;
+    await waitForExchange;
   } catch (err) {
     log("opencode call failed", err instanceof Error ? err.message : String(err));
     await deps.typing.send(chatId, "Agent call failed — check whatsapp-router logs.");

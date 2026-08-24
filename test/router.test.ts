@@ -589,7 +589,10 @@ describe("routeMessage — agent context", () => {
       Promise.resolve({ sessionId: "ses_1", reply: text, messageId: text }),
     );
 
-    const first = routeMessage(deps, "111", "chat1", "first");
+    let firstDone = false;
+    const first = routeMessage(deps, "111", "chat1", "first").then(() => {
+      firstDone = true;
+    });
     await vi.waitFor(() => {
       expect(sendSpy).toHaveBeenCalledTimes(1);
     });
@@ -605,8 +608,10 @@ describe("routeMessage — agent context", () => {
       { chatId: "chat1", text: "first" },
       { chatId: "chat2", text: "second" },
     ]);
+    await second;
+    expect(firstDone).toBe(false);
     release();
-    await Promise.all([first, second]);
+    await first;
   });
 
   it("does not let an old finalizer delete a same-session replacement", async () => {
