@@ -632,4 +632,118 @@ describe("routeMessage — agent context", () => {
     current.release();
     manager.stop("111", second.exchange);
   });
+  it("keeps streamed turns in their originating chat", async () => {
+    deps.sessions.set("111", "ses_1");
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let onTurn!: (messageId: string, text: string, chatId?: string) => void;
+    const watch = {
+      awaitIdle: () => done,
+      acquirePrompt: () => () => undefined,
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockImplementation((_sessionId, callback) => {
+      onTurn = callback;
+      return Promise.resolve(watch);
+    });
+    const sendSpy = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text) =>
+      Promise.resolve({ sessionId: "ses_1", reply: text, messageId: text }),
+    );
+
+    const first = routeMessage(deps, "111", "direct", "first");
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    });
+    onTurn("background-direct", "private background", "direct");
+    await vi.waitFor(() => {
+      expect(sentMessages).toContainEqual({ chatId: "direct", text: "private background" });
+    });
+
+    const second = routeMessage(deps, "111", "group", "second");
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(2);
+    });
+    onTurn("background-group", "group background", "group");
+    await vi.waitFor(() => {
+      expect(sentMessages).toContainEqual({ chatId: "group", text: "group background" });
+    });
+
+    release();
+    await Promise.all([first, second]);
+  });
+
+  it("retries a delivery when the first attempt fails", async () => {
+    const send = vi
+      .spyOn(deps.typing, "send")
+      .mockRejectedValueOnce(new Error("temporary WAHA failure"))
+      .mockResolvedValue(undefined);
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockImplementation(() => Promise.resolve(watch));
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("msg_1", "reply", "chat1");
+    acquired.exchange.deliver("msg_1", "reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+    manager.stop("111", acquired.exchange);
+  });
+
+  it("keeps a created watcher after an ambiguous prompt failure", async () => {
+    deps.sessions.set("111", "ses_1");
+    let releaseDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      releaseDone = resolve;
+    });
+    const stop = vi.fn();
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
+      awaitIdle: () => done,
+      acquirePrompt: () => () => undefined,
+      stop,
+    });
+    const send = vi.spyOn(deps.opencode, "send").mockRejectedValue(new Error("connection reset"));
+
+    const route = routeMessage(deps, "111", CHAT_ID, "hi");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    await route;
+    expect(stop).not.toHaveBeenCalled();
+
+    releaseDone();
+    await vi.waitFor(() => {
+      expect(stop).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("starts the replacement watcher before a stale-session retry", async () => {
+    deps.sessions.set("111", "ses_stale");
+    const watchedSessions: string[] = [];
+    const watch = {
+      awaitIdle: () => Promise.resolve(),
+      acquirePrompt: () => () => undefined,
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockImplementation((sessionId) => {
+      watchedSessions.push(sessionId);
+      return Promise.resolve(watch);
+    });
+    const send = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text, options) => {
+      const replacement = options?.onSessionReplaced?.("ses_new") ?? Promise.resolve();
+      return replacement.then(() => ({ sessionId: "ses_new", reply: text, messageId: "msg_1" }));
+    });
+
+    await routeMessage(deps, "111", CHAT_ID, "hi");
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(watchedSessions).toEqual(["ses_stale", "ses_new"]);
+    expect(deps.sessions.get("111")).toBe("ses_new");
+  });
 });

@@ -85,11 +85,18 @@ function partDelta(messageId: string, partId: string, sessionId: string, delta: 
   };
 }
 
-
-function assistantFinished(messageId: string, sessionId: string, finish = "stop") {
+function assistantFinished(messageId: string, sessionId: string, finish = "stop", parentId?: string) {
   return {
     type: "message.updated",
-    properties: { info: { id: messageId, sessionID: sessionId, role: "assistant", finish } },
+    properties: {
+      info: {
+        id: messageId,
+        sessionID: sessionId,
+        role: "assistant",
+        finish,
+        ...(parentId ? { parentID: parentId } : {}),
+      },
+    },
   };
 }
 
@@ -366,6 +373,32 @@ describe("OpencodeClient.send", () => {
       body: { parts: [{ type: "text", text: "hi" }] },
     });
   });
+  it("starts the replacement hook before retrying a stale session prompt", async () => {
+    const order: string[] = [];
+    sessionPrompt
+      .mockImplementationOnce(() => {
+        order.push("old prompt");
+        return Promise.resolve(fail({ name: "NotFoundError" }, 404));
+      })
+      .mockImplementationOnce(() => {
+        order.push("retry prompt");
+        return Promise.resolve(ok({ info: {}, parts: [] }));
+      });
+    sessionCreate.mockImplementation(() => {
+      order.push("create session");
+      return Promise.resolve(ok({ id: "ses_new" }));
+    });
+    const onSessionReplaced = vi.fn((sessionId: string) => {
+      order.push(`watch ${sessionId}`);
+      return Promise.resolve();
+    });
+
+    await client().send("ses_stale", "hi", { onSessionReplaced });
+
+    expect(order).toEqual(["old prompt", "create session", "watch ses_new", "retry prompt"]);
+    expect(onSessionReplaced).toHaveBeenCalledWith("ses_new");
+  });
+
 
   it("includes a model override when provider and id are both set", async () => {
     sessionPrompt.mockResolvedValue(ok({ info: {}, parts: [] }));
@@ -483,6 +516,54 @@ describe("OpencodeClient.watchSession", () => {
   });
 
 
+  it("routes completed turns to the prompt's originating chat", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+
+    const releaseDirect = watch.acquirePrompt("direct");
+    source.push(textPartUpdated("user_direct", "part_1", "ses_1", "private"));
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_direct",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("assistant_direct", "part_2", "ses_1", "private reply"));
+    source.push(assistantFinished("assistant_direct", "ses_1", "stop", "user_direct"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_direct", "private reply", "direct");
+    });
+    releaseDirect?.();
+
+    const releaseGroup = watch.acquirePrompt("group");
+    source.push(textPartUpdated("user_group", "part_3", "ses_1", "group"));
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_group",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("assistant_group", "part_4", "ses_1", "group reply"));
+    source.push(assistantFinished("assistant_group", "ses_1", "stop", "user_group"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_group", "group reply", "group");
+    });
+    releaseGroup?.();
+    watch.stop();
+  });
+
   it("ignores events for a different session id", async () => {
     const source = fakeEventSource();
     connectSource(source);
@@ -577,7 +658,17 @@ describe("OpencodeClient.watchSession", () => {
       resolved = true;
     });
     source.push(textPartUpdated("user_1", "part_1", "ses_1", "What is a BACKGROUND TASK?"));
-    source.push({ type: "message.updated", properties: { info: { id: "user_1", sessionID: "ses_1", role: "user" } } });
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
     source.push(textPartUpdated("msg_1", "part_2", "ses_1", "It is work that runs later."));
     source.push(assistantFinished("msg_1", "ses_1"));
     source.push(sessionIdle("ses_1"));
@@ -585,6 +676,34 @@ describe("OpencodeClient.watchSession", () => {
     expect(resolved).toBe(true);
     stop();
   });
+  it("does not treat an exact background marker in user input as plugin state", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+    source.push(textPartUpdated("user_1", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY]"));
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("assistant_1", "part_2", "ses_1", "ordinary reply"));
+    source.push(assistantFinished("assistant_1", "ses_1", "stop", "user_1"));
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
+    stop();
+  });
+
 
   it("keeps a watcher alive while a prompt lease is active", async () => {
     const source = fakeEventSource();
@@ -595,7 +714,7 @@ describe("OpencodeClient.watchSession", () => {
     await vi.waitFor(() => {
       expect(vi.getTimerCount()).toBeGreaterThan(0);
     });
-    const release = acquirePrompt();
+    const release = acquirePrompt("chat1");
     expect(release).toBeTypeOf("function");
     let resolved = false;
     void awaitIdle().then(() => {

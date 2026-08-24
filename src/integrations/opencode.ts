@@ -30,6 +30,8 @@ export interface OpencodeSendOptions {
   // separate from the user's own message text — passed straight through to
   // the SDK's per-request `system` field.
   system?: string;
+  // Called after a stale session is replaced and before the retry prompt is sent.
+  onSessionReplaced?: (sessionId: string) => Promise<void>;
 }
 
 // Every error variant has a `name`; only some also have a string `data.message`
@@ -131,7 +133,7 @@ export interface OpencodeSessionWatch {
   awaitIdle: () => Promise<void>;
   // Holds the watcher open while a prompt's HTTP request is in flight.
   // Returns undefined when the watcher has already settled.
-  acquirePrompt: () => (() => void) | undefined;
+  acquirePrompt: (chatId: string) => (() => void) | undefined;
   stop: () => void;
 }
 
@@ -203,6 +205,7 @@ export class OpencodeClient {
 
     if (result.response.status === 404) {
       currentSessionId = await this.createSession();
+      await options.onSessionReplaced?.(currentSessionId);
       result = await this.promptMessage(currentSessionId, text, options);
     }
 
@@ -232,12 +235,16 @@ export class OpencodeClient {
   // just "stop").
   async watchSession(
     sessionId: string,
-    onMessage: (messageId: string, text: string) => void,
+    onMessage: (messageId: string, text: string, chatId?: string) => void,
   ): Promise<OpencodeSessionWatch> {
     const controller = new AbortController();
     // messageId -> partId -> latest text. Full part updates replace the
     // current value; delta events append to the current value.
     const partsByMessage = new Map<string, Map<string, string>>();
+    const pendingPrompts: { chatId: string; active: boolean }[] = [];
+    const chatByMessage = new Map<string, string>();
+    let fallbackChatId: string | undefined;
+    let backgroundChatId: string | undefined;
     let quietTimer: ReturnType<typeof setTimeout>;
     let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
     let connectionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -388,14 +395,38 @@ export class OpencodeClient {
                 partsByMessage.delete(info.id);
 
                 if (info.role === "user") {
-                  const backgroundState = backgroundWorkState(text);
-                  if (backgroundState !== undefined) backgroundWorkPending = backgroundState;
+                  const pendingPrompt = pendingPrompts.shift();
+                  const promptChatId = pendingPrompt?.chatId;
+                  if (pendingPrompt) pendingPrompt.active = false;
+                  if (promptChatId) {
+                    chatByMessage.set(info.id, promptChatId);
+                    fallbackChatId = promptChatId;
+                  }
+                  const isRouterPrompt = info.system?.startsWith("You are being reached over WhatsApp.") === true;
+                  const backgroundState = isRouterPrompt ? undefined : backgroundWorkState(text);
+                  if (backgroundState !== undefined) {
+                    const destinationChatId = backgroundChatId ?? fallbackChatId;
+                    if (destinationChatId) chatByMessage.set(info.id, destinationChatId);
+                    backgroundWorkPending = backgroundState;
+                    if (backgroundState) {
+                      backgroundChatId ??= destinationChatId;
+                    } else {
+                      backgroundChatId = undefined;
+                    }
+                  }
                 }
-                if (info.role === "assistant" && info.finish) {
-                  hasCompletedAssistantTurn = true;
-                  const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
-                  if (reply) onMessage(info.id, reply);
-                  scheduleIdleSettle();
+                if (info.role === "assistant") {
+                  const destinationChatId = info.parentID ? chatByMessage.get(info.parentID) : undefined;
+                  if (destinationChatId) chatByMessage.set(info.id, destinationChatId);
+                  if (info.finish) {
+                    hasCompletedAssistantTurn = true;
+                    const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
+                    if (reply) {
+                      if (destinationChatId) onMessage(info.id, reply, destinationChatId);
+                      else onMessage(info.id, reply);
+                    }
+                    scheduleIdleSettle();
+                  }
                 }
                 break;
               }
@@ -440,9 +471,10 @@ export class OpencodeClient {
       clearTimeout(ceilingTimer);
       throw err;
     }
-
-    const acquirePrompt = (): (() => void) | undefined => {
+    const acquirePrompt = (chatId: string): (() => void) | undefined => {
       if (controller.signal.aborted) return undefined;
+      const pendingPrompt = { chatId, active: true };
+      pendingPrompts.push(pendingPrompt);
       promptLeases += 1;
       clearTimeout(idleCandidateTimer);
       resetQuietTimer();
@@ -450,6 +482,11 @@ export class OpencodeClient {
       return () => {
         if (released) return;
         released = true;
+        if (pendingPrompt.active) {
+          const index = pendingPrompts.indexOf(pendingPrompt);
+          if (index >= 0) pendingPrompts.splice(index, 1);
+          pendingPrompt.active = false;
+        }
         promptLeases -= 1;
         if (controller.signal.aborted) return;
         scheduleIdleSettle();

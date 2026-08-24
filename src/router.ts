@@ -83,8 +83,14 @@ export interface ActiveAgentExchange {
   readonly sessionId: string;
   readonly done: Promise<void>;
   acquirePrompt: (chatId: string) => (() => void) | undefined;
-  deliver: (messageId: string, text: string) => void;
+  deliver: (messageId: string, text: string, chatId: string) => void;
   stop: () => void;
+}
+
+interface PendingDelivery {
+  text: string;
+  chatId: string;
+  fallback?: PendingDelivery;
 }
 
 export class AgentExchangeManager {
@@ -103,14 +109,33 @@ export class AgentExchangeManager {
     }
     current?.stop();
 
-    let destinationChatId = chatId;
+    const fallbackChatId = chatId;
     const delivered = new Set<string>();
-    const onTurn = (messageId: string, turnText: string): void => {
+    const inFlight = new Map<string, PendingDelivery>();
+    const enqueueDelivery = (messageId: string, text: string, destinationChatId: string): void => {
       if (delivered.has(messageId)) return;
-      delivered.add(messageId);
-      void deliver(deps, destinationChatId, turnText).catch((err: unknown) => {
-        log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
-      });
+      const pending = inFlight.get(messageId);
+      if (pending) {
+        pending.fallback = { text, chatId: destinationChatId };
+        return;
+      }
+      const delivery: PendingDelivery = { text, chatId: destinationChatId };
+      inFlight.set(messageId, delivery);
+      void deliver(deps, destinationChatId, text)
+        .then(() => {
+          inFlight.delete(messageId);
+          delivered.add(messageId);
+        })
+        .catch((err: unknown) => {
+          inFlight.delete(messageId);
+          log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
+          if (delivery.fallback) {
+            enqueueDelivery(messageId, delivery.fallback.text, delivery.fallback.chatId);
+          }
+        });
+    };
+    const onTurn = (messageId: string, turnText: string, turnChatId?: string): void => {
+      enqueueDelivery(messageId, turnText, turnChatId ?? fallbackChatId);
     };
     const watch = await watchOrNoop(deps, sessionId, onTurn);
     const exchangeRef: { current: ActiveAgentExchange | undefined } = { current: undefined };
@@ -121,11 +146,10 @@ export class AgentExchangeManager {
     const exchange: ActiveAgentExchange = {
       sessionId,
       done,
-      acquirePrompt: (nextChatId) => {
-        destinationChatId = nextChatId;
-        return watch.acquirePrompt();
+      acquirePrompt: (nextChatId) => watch.acquirePrompt(nextChatId),
+      deliver: (messageId, text, destinationChatId) => {
+        enqueueDelivery(messageId, text, destinationChatId);
       },
-      deliver: onTurn,
       stop: () => {
         watch.stop();
         if (this.active.get(senderKey) === exchange) this.active.delete(senderKey);
@@ -162,7 +186,7 @@ function deliver(deps: RouterDeps, chatId: string, text: string): Promise<void> 
 async function watchOrNoop(
   deps: RouterDeps,
   sessionId: string,
-  onTurn: (messageId: string, text: string) => void,
+  onTurn: (messageId: string, text: string, chatId?: string) => void,
 ): Promise<OpencodeSessionWatch> {
   try {
     return await deps.opencode.watchSession(sessionId, onTurn);
@@ -193,11 +217,10 @@ async function handleAgent(
   }
 
   let exchange!: ActiveAgentExchange;
-  let cleanupExchange: () => void = () => undefined;
   let endTyping: () => Promise<void> = () => Promise.resolve();
   try {
     await deps.senderLock.run(senderKey, async () => {
-      let releasePrompt: (() => void) | undefined;
+      let releasePrompt: () => void = () => undefined;
       try {
         let sessionId = deps.sessions.get(senderKey);
         if (!sessionId) {
@@ -210,36 +233,27 @@ async function handleAgent(
         const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
         exchange = acquired.exchange;
         releasePrompt = acquired.release;
-        if (acquired.created) {
-          cleanupExchange = () => {
-            deps.exchanges.stop(senderKey, exchange);
-          };
-        }
+
+        const replaceExchange = async (nextSessionId: string): Promise<void> => {
+          releasePrompt();
+          deps.exchanges.stop(senderKey, exchange);
+          deps.sessions.set(senderKey, nextSessionId);
+          const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
+          exchange = replacement.exchange;
+          releasePrompt = replacement.release;
+        };
 
         const result = await deps.opencode.send(sessionId, text, {
           media: extras.media,
           system: extras.context ? formatSystemContext(extras.context) : undefined,
+          onSessionReplaced: replaceExchange,
         });
-        if (result.sessionId !== sessionId) {
-          // A stale session was recreated inside send(). The old watcher cannot
-          // observe the retried prompt, so replace it with a watcher on the
-          // actual session and deliver the authoritative result below.
-          releasePrompt();
-          releasePrompt = undefined;
-          deps.exchanges.stop(senderKey, exchange);
-          deps.sessions.set(senderKey, result.sessionId);
-          const replacement = await deps.exchanges.acquire(deps, senderKey, result.sessionId, chatId);
-          exchange = replacement.exchange;
-          releasePrompt = replacement.release;
-          if (replacement.created) {
-            cleanupExchange = () => {
-              deps.exchanges.stop(senderKey, exchange);
-            };
-          }
+        if (result.sessionId !== exchange.sessionId) {
+          await replaceExchange(result.sessionId);
         }
-        exchange.deliver(result.messageId, result.reply);
+        exchange.deliver(result.messageId, result.reply, chatId);
       } finally {
-        releasePrompt?.();
+        releasePrompt();
       }
     });
 
@@ -248,7 +262,6 @@ async function handleAgent(
     // be allowed to acquire the sender's prompt lock.
     await exchange.done;
   } catch (err) {
-    cleanupExchange();
     log("opencode call failed", err instanceof Error ? err.message : String(err));
     await deps.typing.send(chatId, "Agent call failed — check whatsapp-router logs.");
   } finally {
