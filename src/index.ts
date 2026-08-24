@@ -1,7 +1,7 @@
 import { loadConfig } from "./config.js";
 import { MessageDedupe } from "./dedupe.js";
 import { OpencodeClient } from "./integrations/opencode.js";
-import { log } from "./log.js";
+import { info } from "./log.js";
 import { AgentExchangeManager } from "./router.js";
 import { RateLimiter } from "./rateLimit.js";
 import { SenderLock } from "./senderLock.js";
@@ -37,6 +37,6 @@ const deps: ServerDeps = {
 
 const server = buildServer(config, deps);
 server.listen(config.port, () => {
-  log(`whatsapp-router listening on :${String(config.port)}`);
+  info(`whatsapp-router listening on :${String(config.port)}`);
 });
 void identity.ensureLidMap();

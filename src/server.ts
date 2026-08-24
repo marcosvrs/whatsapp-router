@@ -1,7 +1,7 @@
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { Config } from "./config.js";
 import type { MessageDedupe } from "./dedupe.js";
-import { log } from "./log.js";
+import { debug, error, info, warn } from "./log.js";
 import { validWebhookSignature } from "./security.js";
 import { resolveAllowedSender } from "./allowlist.js";
 import type { RateLimiter } from "./rateLimit.js";
@@ -38,7 +38,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
     res: ServerResponse,
   ): Promise<void> {
     if (!validWebhookSignature(body, signature, config.webhookSecret)) {
-      log("rejected webhook: bad or missing hmac signature");
+      warn("rejected webhook: bad or missing hmac signature");
       res.writeHead(401).end();
       return;
     }
@@ -47,23 +47,35 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
 
     try {
       const payload = JSON.parse(body) as WahaWebhookPayload;
-      if (payload.event !== "message") return;
+      if (payload.event !== "message") {
+        debug("ignored webhook event", payload.event);
+        return;
+      }
       const msg: WahaMessage = payload.payload ?? {};
-      if (msg.fromMe) return;
+      if (msg.fromMe) {
+        debug("ignored self-authored message", msg.id);
+        return;
+      }
 
       const from = msg.from;
       const isGroupMessage = (from ?? "").endsWith("@g.us");
       let text = msg.body ?? "";
       const mediaAvailable = hasDownloadableMedia(msg);
-      if (!text && !mediaAvailable && !msg.location) return;
-      if (deps.dedupe.alreadyProcessed(messageDedupeKey(msg))) return;
+      if (!text && !mediaAvailable && !msg.location) {
+        debug("ignored empty message", msg.id);
+        return;
+      }
+      if (deps.dedupe.alreadyProcessed(messageDedupeKey(msg))) {
+        debug("ignored duplicate message", msg.id);
+        return;
+      }
 
       const senderKey = await resolveAllowedSender(deps.identity, config.allowedUsers, from, msg);
       if (!senderKey) {
         if (isGroupMessage) {
-          log("ignored group message (not mentioned or not allowed)", from);
+          warn("ignored group message (not mentioned or not allowed)", from);
         } else {
-          log("rejected sender", from);
+          warn("rejected sender", from);
         }
         return;
       }
@@ -75,12 +87,12 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       await deps.waha.markChatRead(from ?? "");
 
       if (deps.rateLimiter.isLimited(senderKey)) {
-        log("rate limited", senderKey);
+        warn("rate limited", senderKey);
         await deps.waha.sendText(from ?? "", "Rate limit reached — try again in a few minutes.");
         return;
       }
 
-      log("inbound", from, JSON.stringify(text).slice(0, 200));
+      info("inbound", from, JSON.stringify(text).slice(0, 200));
 
       const media: OpencodeMediaAttachment[] = [];
       if (mediaAvailable && msg.media?.url) {
@@ -91,6 +103,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
             dataBase64,
             filename: msg.media.filename ?? undefined,
           });
+          debug("inbound media downloaded", from, msg.media.filename ?? msg.media.mimetype ?? "unknown");
         }
       }
 
@@ -120,7 +133,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
             }
           }
         } catch (err) {
-          log("recent-history fetch failed", err instanceof Error ? err.message : String(err));
+          warn("recent-history fetch failed", err instanceof Error ? err.message : String(err));
         }
       }
 
@@ -141,7 +154,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       });
       if (reply) await deps.waha.sendText(from ?? "", reply);
     } catch (err) {
-      log("webhook handling error", err instanceof Error ? err.message : String(err));
+      error("webhook handling error", err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -162,7 +175,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       body += String(chunk);
       if (body.length > config.maxBodyBytes) {
         tooLarge = true;
-        log("rejected webhook: body too large");
+        warn("rejected webhook: body too large");
         res.writeHead(413).end();
         req.destroy();
       }

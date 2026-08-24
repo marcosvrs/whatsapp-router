@@ -7,7 +7,7 @@ import {
   type Part,
   type TextPartInput,
 } from "@opencode-ai/sdk";
-import { log } from "../log.js";
+import { debug, error, info, warn } from "../log.js";
 
 export interface OpencodeClientOptions {
   baseUrl: string;
@@ -258,7 +258,7 @@ export class OpencodeClient {
     const { info, parts } = result.data;
     if (info.error) {
       const errMsg = errorMessage(info.error);
-      log("opencode agent error", errMsg);
+      warn("opencode agent error", errMsg);
       return { sessionId: currentSessionId, reply: `Agent error: ${errMsg}`, messageId: info.id };
     }
 
@@ -335,7 +335,7 @@ export class OpencodeClient {
         for (const resolve of waiters) resolve();
       }
       turnWaiters.clear();
-      if (reason) log("watchSession", reason);
+      if (reason) info("watchSession", reason);
       controller.abort();
       resolveIdle();
     };
@@ -448,11 +448,12 @@ export class OpencodeClient {
         scheduleIdleSettle();
         await consume(stream);
       } catch (err) {
-        log("watchSession reconnect failed, retrying", err instanceof Error ? err.message : String(err));
+        warn("watchSession reconnect failed, retrying", err instanceof Error ? err.message : String(err));
         scheduleReconnect();
       }
     };
     const scheduleReconnect = (delay = 1_000): void => {
+      debug("watchSession reconnect scheduled", sessionId, delay);
       clearTimeout(reconnectTimer);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = undefined;
@@ -473,6 +474,7 @@ export class OpencodeClient {
       clearTimeout(connectionTimer);
       connectionTimer = undefined;
       resolveConnection();
+      debug("watchSession connected", sessionId);
     };
     const processUserMessageState = (messageId: string, text: string, system?: string): boolean => {
       const isRouterPrompt = system?.startsWith("You are being reached over WhatsApp.") === true;
@@ -519,7 +521,7 @@ export class OpencodeClient {
         });
         return result.data ? extractReplyText(result.data.parts) : "";
       } catch (err) {
-        log("watchSession message recovery failed", err instanceof Error ? err.message : String(err));
+        warn("watchSession message recovery failed", err instanceof Error ? err.message : String(err));
         return "";
       }
     };
@@ -537,7 +539,7 @@ export class OpencodeClient {
         onSseError: (err) => {
           connectionErrorState.hadError = true;
           connectionErrorState.attempts += 1;
-          log("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
+          warn("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
         },
       });
 
@@ -681,12 +683,12 @@ export class OpencodeClient {
         }
       } catch (err) {
         if (!controller.signal.aborted) {
-          log("watchSession stream error", err instanceof Error ? err.message : String(err));
+          error("watchSession stream error", err instanceof Error ? err.message : String(err));
         }
       } finally {
         rejectConnection(new Error("SSE stream ended before connection"));
         if (!controller.signal.aborted && connectionErrorState.hadError) {
-          log(
+          error(
             "watchSession stream ended after connection retries were exhausted — " +
               "may not reflect the session actually being done",
           );

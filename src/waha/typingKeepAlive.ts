@@ -1,4 +1,4 @@
-import { log } from "../log.js";
+import { debug, error, warn } from "../log.js";
 import { SenderLock } from "../senderLock.js";
 import type { WahaClientLike } from "./client.js";
 
@@ -25,7 +25,7 @@ function boundedPresenceRequest(
 }
 
 function logStartTypingFailure(err: unknown): void {
-  log("startTyping failed", err instanceof Error ? err.message : String(err));
+  warn("startTyping failed", err instanceof Error ? err.message : String(err));
 }
 
 // Keeps WhatsApp's typing indicator visible across a whole agent exchange,
@@ -63,19 +63,20 @@ export class TypingPresence {
         }
       })
       .catch((err: unknown) => {
-        log("TypingPresence.begin failed", err instanceof Error ? err.message : String(err));
+        error("TypingPresence.begin failed", err instanceof Error ? err.message : String(err));
       });
   }
 
   send(chatId: string, text: string, id?: string): Promise<void> {
     return this.perChat.run(chatId, async () => {
+      debug("sending WhatsApp reply", chatId, id ?? "without-id");
       this.pauseInterval(chatId);
       // Presence cleanup is best-effort. A transient WAHA failure must never
       // suppress the actual reply, and the message id may already be marked
       // delivered by the caller's dedupe set.
       await boundedPresenceRequest("stopTyping", (signal) => this.waha.stopTyping(chatId, signal)).catch(
         (err: unknown) => {
-          log("stopTyping failed", err instanceof Error ? err.message : String(err));
+          warn("stopTyping failed", err instanceof Error ? err.message : String(err));
         },
       );
       if (id) await this.waha.sendText(chatId, text, id);
@@ -100,7 +101,7 @@ export class TypingPresence {
       this.pauseInterval(chatId);
       await boundedPresenceRequest("stopTyping", (signal) => this.waha.stopTyping(chatId, signal)).catch(
         (err: unknown) => {
-          log("stopTyping failed", err instanceof Error ? err.message : String(err));
+          warn("stopTyping failed", err instanceof Error ? err.message : String(err));
         },
       );
     });

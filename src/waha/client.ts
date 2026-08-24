@@ -1,4 +1,4 @@
-import { log } from "../log.js";
+import { error } from "../log.js";
 import type { WahaHistoryMessage } from "./payload.js";
 
 export interface WahaGroupParticipant {
@@ -49,7 +49,7 @@ export class WahaClient implements WahaClientLike {
 
   private async logIfFailed(action: string, res: Response): Promise<void> {
     if (!res.ok) {
-      log(`${action} failed`, res.status, await res.text().catch(() => ""));
+      error(`${action} failed`, res.status, await res.text().catch(() => ""));
     }
   }
 
@@ -136,12 +136,12 @@ export class WahaClient implements WahaClientLike {
         headers: { "X-Api-Key": this.apiKey },
       });
       if (!res.ok) {
-        log("downloadMedia failed", res.status, await res.text().catch(() => ""));
+        error("downloadMedia failed", res.status, await res.text().catch(() => ""));
         return null;
       }
       return Buffer.from(await res.arrayBuffer()).toString("base64");
     } catch (err) {
-      log("downloadMedia failed", err instanceof Error ? err.message : String(err));
+      error("downloadMedia failed", err instanceof Error ? err.message : String(err));
       return null;
     }
   }

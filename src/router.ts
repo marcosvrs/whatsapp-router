@@ -5,7 +5,7 @@ import {
   type OpencodeSendResult,
   type OpencodeSessionWatch,
 } from "./integrations/opencode.js";
-import { log } from "./log.js";
+import { debug, error, warn } from "./log.js";
 import { markdownToWhatsapp } from "./markdownToWhatsapp.js";
 import type { SenderLock } from "./senderLock.js";
 import type { SessionStore } from "./sessionStore.js";
@@ -128,24 +128,27 @@ export class AgentExchangeManager {
         return;
       }
       const delivery: PendingDelivery = { text, chatId: destinationChatId };
+      debug("agent turn delivery queued", messageId, destinationChatId);
       inFlight.set(messageId, delivery);
       void deliver(deps, destinationChatId, text, messageId)
         .then(() => {
           inFlight.delete(messageId);
           delivered.add(messageId);
+          debug("agent turn delivered", messageId, destinationChatId);
         })
         .catch((err: unknown) => {
           inFlight.delete(messageId);
-          log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
+          error("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
           const fallback: PendingDelivery | undefined = delivery.fallback;
           if (delivery.fallback) {
+            warn("retrying agent turn delivery", messageId);
             enqueueDelivery(messageId, fallback?.text ?? "", fallback?.chatId ?? "");
           }
         });
     };
     const onTurn = (messageId: string, turnText: string, turnChatId?: string): void => {
       if (!turnChatId) {
-        log("discarding unmapped agent turn", messageId);
+        warn("discarding unmapped agent turn", messageId);
         return;
       }
       enqueueDelivery(messageId, turnText, turnChatId);
@@ -209,7 +212,7 @@ async function watchOrNoop(
   try {
     return await deps.opencode.watchSession(sessionId, onTurn);
   } catch (err) {
-    log("watchSession connect failed — continuing without live streaming", err instanceof Error ? err.message : String(err));
+    error("watchSession connect failed — continuing without live streaming", err instanceof Error ? err.message : String(err));
     return {
       awaitIdle: () => Promise.resolve(),
       acquirePrompt: () => () => undefined,
@@ -293,7 +296,7 @@ async function handleAgent(
     // be allowed to acquire the sender's prompt lock.
     await waitForExchange;
   } catch (err) {
-    log("opencode call failed", err instanceof Error ? err.message : String(err));
+    error("opencode call failed", err instanceof Error ? err.message : String(err));
     await deps.typing.send(chatId, "Agent call failed — check whatsapp-router logs.");
   } finally {
     await endTyping();

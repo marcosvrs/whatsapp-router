@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { log } from "./log.js";
+import { error } from "./log.js";
 
 interface SessionEntry {
   sessionId: string;
@@ -48,7 +48,7 @@ export class SessionStore {
       mkdirSync(dirname(this.filePath), { recursive: true });
       writeFileSync(this.filePath, JSON.stringify(Object.fromEntries(this.sessions)));
     } catch (err) {
-      log("saveSessions failed", err instanceof Error ? err.message : String(err));
+      error("saveSessions failed", err instanceof Error ? err.message : String(err));
     }
   }
 }
