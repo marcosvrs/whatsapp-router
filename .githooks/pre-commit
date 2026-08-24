@@ -1,7 +1,13 @@
 #!/bin/sh
-# Lints staged .ts files only — a native equivalent of lint-staged, no dependency needed.
-set -e
-if git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | grep -qz .; then
-  git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | xargs -0 npx eslint --fix
-  git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | xargs -0 git add
+set -eu
+
+staged_ts=$(git diff --cached --name-only --diff-filter=ACMRTUXB -- '*.ts')
+if [ -n "$staged_ts" ]; then
+  # Paths in this repository do not contain whitespace; avoid npx so this
+  # hook cannot download or execute an unpinned package.
+  npm exec --offline -- eslint --fix -- $staged_ts
+  git add -- $staged_ts
 fi
+
+git diff --cached --check
+gitleaks protect --staged --redact

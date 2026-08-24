@@ -1,0 +1,80 @@
+name: Fast Push Verification
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fast-push:
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: Scan full git history for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+
+      - name: Setup Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - name: Pin npm policy toolchain
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check whitespace
+        run: git diff --check "$(git merge-base origin/main "$GITHUB_SHA")" "$GITHUB_SHA"
+
+      - name: Typecheck full project
+        run: npm run typecheck
+
+      - name: Lint changed TypeScript files
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha="$(git merge-base origin/main "$GITHUB_SHA")"
+          mapfile -t changed_ts < <(
+            git diff --name-only --diff-filter=ACMRTUXB "$base_sha" "$GITHUB_SHA" -- '*.ts'
+          )
+          if ((${#changed_ts[@]} > 0)); then
+            npm exec --offline -- eslint "${changed_ts[@]}"
+          fi
+
+      - name: Test changed impact
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha="$(git merge-base origin/main "$GITHUB_SHA")"
+          full_test=false
+          while IFS= read -r changed_file; do
+            case "$changed_file" in
+              package.json|package-lock.json|.npmrc|tsconfig*.json|vitest.config.*|eslint.config.*|Dockerfile|.github/workflows/*|src/index.ts)
+                full_test=true
+                ;;
+            esac
+          done < <(git diff --name-only --diff-filter=ACMRTUXB "$base_sha" "$GITHUB_SHA")
+          if [ "$full_test" = true ]; then
+            npm test
+          else
+            npm exec --offline -- vitest run --changed "$base_sha"
+          fi
