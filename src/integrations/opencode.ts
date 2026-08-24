@@ -1,6 +1,7 @@
 import {
   createOpencodeClient,
   type AssistantMessage,
+  type Event,
   type FilePartInput,
   type OpencodeClient as SdkClient,
   type Part,
@@ -56,6 +57,51 @@ function extractReplyText(parts: Part[]): string {
     parts.filter((p): p is Extract<Part, { type: "text" }> => p.type === "text").map((p) => p.text),
   );
 }
+interface MessagePartDeltaEvent {
+  type: "message.part.delta";
+  properties: {
+    sessionID: string;
+    messageID: string;
+    partID: string;
+    field: string;
+    delta: string;
+  };
+}
+
+function isMessagePartDeltaEvent(event: unknown): event is MessagePartDeltaEvent {
+  if (!event || typeof event !== "object") return false;
+  const candidate = event as { type?: unknown; properties?: unknown };
+  if (candidate.type !== "message.part.delta" || !candidate.properties || typeof candidate.properties !== "object") {
+    return false;
+  }
+  const properties = candidate.properties as Record<string, unknown>;
+  return (
+    typeof properties.sessionID === "string" &&
+    typeof properties.messageID === "string" &&
+    typeof properties.partID === "string" &&
+    typeof properties.field === "string" &&
+    typeof properties.delta === "string"
+  );
+}
+
+const BACKGROUND_TASK_PROGRESS_MARKERS = [
+  "[BACKGROUND TASK RESULT READY]",
+  "[BACKGROUND TASK RETRYING]",
+  "[BACKGROUND TASK RETRY SESSION READY]",
+] as const;
+const BACKGROUND_TASK_COMPLETE_MARKER = "[ALL BACKGROUND TASKS COMPLETE]";
+
+function backgroundWorkState(text: string): boolean | undefined {
+  const normalized = text.trim();
+  if (normalized.startsWith(BACKGROUND_TASK_COMPLETE_MARKER)) return false;
+  if (BACKGROUND_TASK_PROGRESS_MARKERS.some((marker) => normalized.startsWith(marker))) return true;
+  return undefined;
+}
+
+// The current OpenCode server emits server.connected as the first SSE event.
+// The SDK creates the async stream lazily, so readiness is resolved from the
+// actual stream callback rather than from a separate probe request.
+export const SSE_CONNECT_TIMEOUT_MS = 30_000;
 
 // How long to keep watching a session after its last activity before
 // treating the exchange as settled — chosen after live-testing a real
@@ -83,18 +129,19 @@ export interface OpencodeSessionWatch {
   // `this` binding, and method shorthand makes eslint's unbound-method rule
   // flag them as unsafe to destructure even though they aren't.
   awaitIdle: () => Promise<void>;
+  // Holds the watcher open while a prompt's HTTP request is in flight.
+  // Returns undefined when the watcher has already settled.
+  acquirePrompt: () => (() => void) | undefined;
   stop: () => void;
 }
 
 export class OpencodeClient {
   private readonly client: SdkClient;
-  private readonly baseUrl: string;
   private readonly authHeader: string;
   private readonly modelProvider: string;
   private readonly modelId: string;
 
   constructor(options: OpencodeClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.authHeader = options.authHeader;
     this.modelProvider = options.modelProvider;
     this.modelId = options.modelId;
@@ -188,19 +235,24 @@ export class OpencodeClient {
     onMessage: (messageId: string, text: string) => void,
   ): Promise<OpencodeSessionWatch> {
     const controller = new AbortController();
-    // messageId -> partId -> latest text. `message.part.updated` carries the
-    // full current value, not a delta.
+    // messageId -> partId -> latest text. Full part updates replace the
+    // current value; delta events append to the current value.
     const partsByMessage = new Map<string, Map<string, string>>();
     let quietTimer: ReturnType<typeof setTimeout>;
     let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
+    let connectionTimer: ReturnType<typeof setTimeout> | undefined;
     let resolveIdle: () => void;
     let resolveConnection!: () => void;
+    let rejectConnection!: (error: unknown) => void;
     const connectionErrorState = { hadError: false, attempts: 0 };
     let hasCompletedAssistantTurn = false;
     let sessionBusy = false;
     let backgroundWorkPending = false;
-    const connectionPromise = new Promise<void>((resolve) => {
+    let promptLeases = 0;
+    let connected = false;
+    const connectionPromise = new Promise<void>((resolve, reject) => {
       resolveConnection = resolve;
+      rejectConnection = reject;
     });
     const idlePromise = new Promise<void>((resolve) => {
       resolveIdle = resolve;
@@ -211,6 +263,8 @@ export class OpencodeClient {
       clearTimeout(quietTimer);
       clearTimeout(ceilingTimer);
       clearTimeout(idleCandidateTimer);
+      clearTimeout(connectionTimer);
+      connectionTimer = undefined;
       if (reason) log("watchSession", reason);
       controller.abort();
       resolveIdle();
@@ -223,7 +277,7 @@ export class OpencodeClient {
     const resetQuietTimer = (): void => {
       clearTimeout(quietTimer);
       quietTimer = setTimeout(() => {
-        if (sessionBusy || backgroundWorkPending || !hasCompletedAssistantTurn) {
+        if (sessionBusy || backgroundWorkPending || promptLeases > 0 || !hasCompletedAssistantTurn) {
           resetQuietTimer();
           return;
         }
@@ -232,39 +286,44 @@ export class OpencodeClient {
     };
 
     const scheduleIdleSettle = (): void => {
-      if (sessionBusy || backgroundWorkPending || !hasCompletedAssistantTurn) return;
+      if (sessionBusy || backgroundWorkPending || promptLeases > 0 || !hasCompletedAssistantTurn) return;
       clearTimeout(idleCandidateTimer);
       // Give the background-task plugin a short window to inject its status
       // marker after an idle event. Plain one-turn exchanges then release
       // their watcher promptly instead of waiting IDLE_GRACE_MS.
       idleCandidateTimer = setTimeout(() => {
-        if (!sessionBusy && !backgroundWorkPending && hasCompletedAssistantTurn) {
+        if (!sessionBusy && !backgroundWorkPending && promptLeases === 0 && hasCompletedAssistantTurn) {
           settle("session idle");
         }
       }, 1_000);
     };
 
     resetQuietTimer();
+    connectionTimer = setTimeout(() => {
+      const error = new Error("SSE connection timed out");
+      rejectConnection(error);
+      settle("SSE connection setup timed out");
+    }, SSE_CONNECT_TIMEOUT_MS);
 
-    // The SDK's generated SSE client does not expose a reliable "connected"
-    // callback (its custom fetch option is ignored by the SSE implementation).
-    // Perform a short-lived header handshake first, then create the SDK stream.
-    // This guarantees the server is reachable before the prompt is submitted
-    // without leaving the handshake response open.
+    const markConnected = (): void => {
+      if (connected) return;
+      connected = true;
+      clearTimeout(connectionTimer);
+      connectionTimer = undefined;
+      resolveConnection();
+    };
+
+    // event.subscribe() returns a lazy async stream. The current server emits
+    // server.connected as its first event, and the SDK callback fires only
+    // once the actual SSE request has produced an event.
     let subscribeResult: Awaited<ReturnType<SdkClient["event"]["subscribe"]>>;
     try {
-      const handshakeController = new AbortController();
-      const response = await fetch(`${this.baseUrl}/event`, {
-        headers: this.authHeader ? { Authorization: this.authHeader } : undefined,
-        signal: handshakeController.signal,
-      });
-      if (!response.ok) throw new Error(`SSE failed: ${String(response.status)}`);
-      handshakeController.abort();
-      resolveConnection();
-
       subscribeResult = await this.client.event.subscribe({
         signal: controller.signal,
         sseMaxRetryAttempts: 3,
+        onSseEvent: () => {
+          markConnected();
+        },
         onSseError: (err) => {
           connectionErrorState.hadError = true;
           connectionErrorState.attempts += 1;
@@ -282,54 +341,79 @@ export class OpencodeClient {
       try {
         for await (const event of stream) {
           if (controller.signal.aborted) break;
+          markConnected();
+          const rawEvent = event as unknown as Event | MessagePartDeltaEvent;
           let relevant = false;
-          switch (event.type) {
-            case "message.part.updated": {
-              const { part } = event.properties;
-              if (part.sessionID !== sessionId) break;
-              relevant = true;
-              if (part.type !== "text") sessionBusy = true;
-              let byPart = partsByMessage.get(part.messageID);
-              if (!byPart) {
-                byPart = new Map();
-                partsByMessage.set(part.messageID, byPart);
-              }
-              if (part.type === "text") byPart.set(part.id, part.text);
-              break;
-            }
-            case "message.updated": {
-              const { info } = event.properties;
-              if (info.sessionID !== sessionId) break;
-              relevant = true;
-              const byPart = partsByMessage.get(info.id);
-              const text = byPart ? joinTexts([...byPart.values()]) : "";
-              partsByMessage.delete(info.id);
 
-              if (info.role === "user" && text.includes("BACKGROUND TASK")) {
-                backgroundWorkPending = !text.includes("[ALL BACKGROUND TASKS COMPLETE]");
-              }
-              if (info.role === "assistant" && info.finish) {
-                hasCompletedAssistantTurn = true;
-                const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
-                if (reply) onMessage(info.id, reply);
-                scheduleIdleSettle();
-              }
-              break;
-            }
-            case "session.idle":
-            case "session.status": {
-              if (event.properties.sessionID !== sessionId) break;
+          if (isMessagePartDeltaEvent(rawEvent)) {
+            const { properties } = rawEvent;
+            if (properties.sessionID === sessionId) {
               relevant = true;
-              if (event.type === "session.status") {
-                sessionBusy = event.properties.status.type !== "idle";
+              if (properties.field === "text") {
+                let byPart = partsByMessage.get(properties.messageID);
+                if (!byPart) {
+                  byPart = new Map();
+                  partsByMessage.set(properties.messageID, byPart);
+                }
+                byPart.set(
+                  properties.partID,
+                  `${byPart.get(properties.partID) ?? ""}${properties.delta}`,
+                );
               } else {
-                sessionBusy = false;
+                sessionBusy = true;
               }
-              scheduleIdleSettle();
-              break;
             }
-            default:
-              break;
+          } else {
+            const typedEvent = rawEvent;
+            switch (typedEvent.type) {
+              case "message.part.updated": {
+                const { part } = typedEvent.properties;
+                if (part.sessionID !== sessionId) break;
+                relevant = true;
+                if (part.type !== "text") sessionBusy = true;
+                let byPart = partsByMessage.get(part.messageID);
+                if (!byPart) {
+                  byPart = new Map();
+                  partsByMessage.set(part.messageID, byPart);
+                }
+                if (part.type === "text") byPart.set(part.id, part.text);
+                break;
+              }
+              case "message.updated": {
+                const { info } = typedEvent.properties;
+                if (info.sessionID !== sessionId) break;
+                relevant = true;
+                const byPart = partsByMessage.get(info.id);
+                const text = byPart ? joinTexts([...byPart.values()]) : "";
+                partsByMessage.delete(info.id);
+
+                if (info.role === "user") {
+                  const backgroundState = backgroundWorkState(text);
+                  if (backgroundState !== undefined) backgroundWorkPending = backgroundState;
+                }
+                if (info.role === "assistant" && info.finish) {
+                  hasCompletedAssistantTurn = true;
+                  const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
+                  if (reply) onMessage(info.id, reply);
+                  scheduleIdleSettle();
+                }
+                break;
+              }
+              case "session.idle":
+              case "session.status": {
+                if (typedEvent.properties.sessionID !== sessionId) break;
+                relevant = true;
+                if (typedEvent.type === "session.status") {
+                  sessionBusy = typedEvent.properties.status.type !== "idle";
+                } else {
+                  sessionBusy = false;
+                }
+                scheduleIdleSettle();
+                break;
+              }
+              default:
+                break;
+            }
           }
           if (relevant) resetQuietTimer();
         }
@@ -338,6 +422,7 @@ export class OpencodeClient {
           log("watchSession stream error", err instanceof Error ? err.message : String(err));
         }
       } finally {
+        rejectConnection(new Error("SSE stream ended before connection"));
         if (!controller.signal.aborted && connectionErrorState.hadError) {
           log(
             "watchSession stream ended after connection retries were exhausted — " +
@@ -356,8 +441,25 @@ export class OpencodeClient {
       throw err;
     }
 
+    const acquirePrompt = (): (() => void) | undefined => {
+      if (controller.signal.aborted) return undefined;
+      promptLeases += 1;
+      clearTimeout(idleCandidateTimer);
+      resetQuietTimer();
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        promptLeases -= 1;
+        if (controller.signal.aborted) return;
+        scheduleIdleSettle();
+        resetQuietTimer();
+      };
+    };
+
     return {
       awaitIdle: () => idlePromise,
+      acquirePrompt,
       stop: () => {
         settle("");
       },

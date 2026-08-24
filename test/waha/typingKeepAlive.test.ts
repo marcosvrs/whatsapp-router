@@ -110,6 +110,25 @@ describe("TypingPresence", () => {
 
     expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
   });
+  it("keeps a successful send successful when typing restart fails", async () => {
+    const waha = fakeWaha();
+    const startTyping = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("WAHA unavailable"))
+      .mockResolvedValue(undefined);
+    waha.startTyping = startTyping;
+    const typing = new TypingPresence(waha);
+
+    typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(typing.send("chat1", "hello")).resolves.toBeUndefined();
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(startTyping).toHaveBeenCalledTimes(3);
+  });
+
 
   it("orders an in-flight refresh before stopTyping and sendText", async () => {
     const calls: string[] = [];

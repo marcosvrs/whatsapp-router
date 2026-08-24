@@ -10,7 +10,9 @@ const createOpencodeClient = vi.fn(() => ({
 
 vi.mock("@opencode-ai/sdk", () => ({ createOpencodeClient }));
 
-const { OpencodeClient, IDLE_GRACE_MS, MAX_WAIT_MS } = await import("../../src/integrations/opencode.js");
+const { OpencodeClient, IDLE_GRACE_MS, MAX_WAIT_MS, SSE_CONNECT_TIMEOUT_MS } = await import(
+  "../../src/integrations/opencode.js",
+);
 
 function ok<T>(data: T, status = 200): { data: T; error: undefined; response: { status: number } } {
   return { data, error: undefined, response: { status } };
@@ -76,6 +78,13 @@ function textPartUpdated(messageId: string, partId: string, sessionId: string, t
     properties: { part: { id: partId, messageID: messageId, sessionID: sessionId, type: "text", text } },
   };
 }
+function partDelta(messageId: string, partId: string, sessionId: string, delta: string) {
+  return {
+    type: "message.part.delta",
+    properties: { messageID: messageId, partID: partId, sessionID: sessionId, field: "text", delta },
+  };
+}
+
 
 function assistantFinished(messageId: string, sessionId: string, finish = "stop") {
   return {
@@ -408,13 +417,14 @@ describe("OpencodeClient.watchSession", () => {
     return new OpencodeClient({ baseUrl: "http://oc.test", authHeader: "Basic abc", modelProvider: "", modelId: "" });
   }
 
-  function connectSource(source: { stream: AsyncIterable<unknown> }): void {
-    eventSubscribe.mockImplementation(
-      async (options: { fetch?: (request: Request) => Promise<Response> }) => {
-        await options.fetch?.(new Request("http://oc.test/event"));
-        return { stream: source.stream };
-      },
-    );
+  function connectSource(
+    source: { stream: AsyncIterable<unknown>; push: (event: unknown) => void },
+    emitConnected = true,
+  ): void {
+    eventSubscribe.mockImplementation(() => {
+      if (emitConnected) source.push({ type: "server.connected", properties: {} });
+      return { stream: source.stream };
+    });
   }
 
   it("delivers each completed assistant turn as it streams in, using the latest text per part", async () => {
@@ -437,6 +447,41 @@ describe("OpencodeClient.watchSession", () => {
     stop();
     await awaitIdle();
   });
+  it("accumulates text from message.part.delta events", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+
+    source.push(partDelta("msg_1", "prt_1", "ses_1", "hello "));
+    source.push(partDelta("msg_1", "prt_1", "ses_1", "world"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("msg_1", "hello world");
+    });
+    stop();
+  });
+
+  it("waits for the actual SSE stream before returning", async () => {
+    const source = fakeEventSource();
+    connectSource(source, false);
+    let resolved = false;
+    const watchPromise = client()
+      .watchSession("ses_1", vi.fn())
+      .then((watch) => {
+        resolved = true;
+        return watch;
+      });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolved).toBe(false);
+    source.push({ type: "server.connected", properties: {} });
+    const watch = await watchPromise;
+    expect(resolved).toBe(true);
+    watch.stop();
+  });
+
 
   it("ignores events for a different session id", async () => {
     const source = fakeEventSource();
@@ -523,6 +568,48 @@ describe("OpencodeClient.watchSession", () => {
     expect(resolved).toBe(true);
     stop();
   });
+  it("does not pin the watcher for ordinary user text mentioning background tasks", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+    source.push(textPartUpdated("user_1", "part_1", "ses_1", "What is a BACKGROUND TASK?"));
+    source.push({ type: "message.updated", properties: { info: { id: "user_1", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("msg_1", "part_2", "ses_1", "It is work that runs later."));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
+    stop();
+  });
+
+  it("keeps a watcher alive while a prompt lease is active", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, acquirePrompt, stop } = await client().watchSession("ses_1", vi.fn());
+    source.push(textPartUpdated("msg_1", "part_1", "ses_1", "first"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    await vi.waitFor(() => {
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+    });
+    const release = acquirePrompt();
+    expect(release).toBeTypeOf("function");
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(false);
+    release?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
+    stop();
+  });
+
 
   it("hits the hard ceiling even with continuous activity", async () => {
     const source = fakeEventSource();
@@ -573,21 +660,36 @@ describe("OpencodeClient.watchSession", () => {
     await expect(client().watchSession("ses_1", vi.fn())).rejects.toThrow("connection reset");
     expect(vi.getTimerCount()).toBe(0);
   });
+  it("times out when the actual SSE stream never connects", async () => {
+    const source = fakeEventSource();
+    connectSource(source, false);
+    const watchPromise = client().watchSession("ses_1", vi.fn());
+    const rejection = expect(watchPromise).rejects.toThrow("SSE connection timed out");
+    await vi.advanceTimersByTimeAsync(SSE_CONNECT_TIMEOUT_MS);
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
 
   it("logs and settles cleanly when the stream errors after connecting", async () => {
     const throwingStream = {
       [Symbol.asyncIterator]() {
+        let first = true;
         return {
           next(): Promise<IteratorResult<unknown>> {
+            if (first) {
+              first = false;
+              return Promise.resolve({
+                done: false,
+                value: { type: "server.connected", properties: {} },
+              });
+            }
             return Promise.reject(new Error("dropped mid-stream"));
           },
         };
       },
     };
-    eventSubscribe.mockImplementation(async (options: { fetch?: (request: Request) => Promise<Response> }) => {
-      await options.fetch?.(new Request("http://oc.test/event"));
-      return { stream: throwingStream };
-    });
+    eventSubscribe.mockResolvedValue({ stream: throwingStream });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { awaitIdle } = await client().watchSession("ses_1", vi.fn());
     await awaitIdle();

@@ -30,6 +30,6 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "1.18.11"
+    "@opencode-ai/sdk": "1.18.21"
   }
 }

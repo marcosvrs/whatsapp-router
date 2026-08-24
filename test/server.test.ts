@@ -39,6 +39,14 @@ function testConfig(): Config {
     rateLimitWindowMs: 5 * 60 * 1000,
   };
 }
+function sseConnectedResponse(): Response {
+  const body = `data: ${JSON.stringify({ type: "server.connected", properties: {} })}\n\n`;
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
 
 function sign(body: string): string {
   return createHmac("sha512", SECRET).update(body).digest("hex");
@@ -145,8 +153,10 @@ function rawRequest(
   });
 }
 
-function postWebhook(body: string, headers: Record<string, string> = {}): Promise<{ status: number }> {
-  return rawRequest("/webhook", "POST", body, headers);
+async function postWebhook(body: string, headers: Record<string, string> = {}): Promise<{ status: number }> {
+  const response = await rawRequest("/webhook", "POST", body, headers);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return response;
 }
 
 describe("server routing", () => {
@@ -218,6 +228,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
@@ -238,6 +249,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
@@ -267,6 +279,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
@@ -295,6 +308,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
@@ -324,6 +338,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(
             new Response(JSON.stringify({ id: "ses_1" }), {
@@ -363,6 +378,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(
             new Response(JSON.stringify({ id: "ses_1" }), {
@@ -405,6 +421,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(
             new Response(JSON.stringify({ id: "ses_1" }), {
@@ -435,6 +452,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation(async (input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return sseConnectedResponse();
         if (url.endsWith("/session")) {
           return new Response(JSON.stringify({ id: "ses_1" }), {
             headers: { "Content-Type": "application/json" },
@@ -469,6 +487,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(
             new Response(JSON.stringify({ id: "ses_1" }), {
@@ -515,6 +534,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation(async (input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return sseConnectedResponse();
         if (url.endsWith("/session")) {
           return new Response(JSON.stringify({ id: "ses_1" }), {
             headers: { "Content-Type": "application/json" },
@@ -543,6 +563,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation(async (input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return sseConnectedResponse();
         if (url.endsWith("/session")) {
           return new Response(JSON.stringify({ id: "ses_1" }), {
             headers: { "Content-Type": "application/json" },
@@ -704,6 +725,7 @@ describe("server message handling", () => {
         "fetch",
         vi.fn().mockImplementation(async (input: unknown) => {
           const url = requestUrl(input);
+          if (url.endsWith("/event")) return sseConnectedResponse();
           if (url.endsWith("/session")) {
             return new Response(JSON.stringify({ id: "ses_1" }), {
               headers: { "Content-Type": "application/json" },
@@ -745,6 +767,7 @@ describe("server message handling", () => {
         "fetch",
         vi.fn().mockImplementation(async (input: unknown) => {
           const url = requestUrl(input);
+          if (url.endsWith("/event")) return sseConnectedResponse();
           if (url.endsWith("/session")) {
             return new Response(JSON.stringify({ id: "ses_1" }), {
               headers: { "Content-Type": "application/json" },
@@ -771,6 +794,7 @@ describe("server message handling", () => {
         "fetch",
         vi.fn().mockImplementation((input: unknown) => {
           const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
           if (url.endsWith("/session")) {
             return Promise.resolve(
               new Response(JSON.stringify({ id: "ses_1" }), {
@@ -797,6 +821,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }
@@ -868,6 +893,7 @@ describe("server message handling", () => {
       "fetch",
       vi.fn().mockImplementation((input: unknown) => {
         const url = requestUrl(input);
+        if (url.endsWith("/event")) return Promise.resolve(sseConnectedResponse());
         if (url.endsWith("/session")) {
           return Promise.resolve(new Response(JSON.stringify({ id: "ses_1" }), { headers: { "Content-Type": "application/json" } }));
         }

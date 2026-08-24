@@ -522,8 +522,11 @@ describe("routeMessage — agent context", () => {
     const done = new Promise<void>((resolve) => {
       release = resolve;
     });
+    const releasePrompt = vi.fn();
+    const acquirePrompt = vi.fn(() => releasePrompt);
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
       awaitIdle: () => done,
+      acquirePrompt,
       stop: vi.fn(),
     });
     const sendSpy = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text) =>
@@ -545,6 +548,8 @@ describe("routeMessage — agent context", () => {
 
     release();
     await Promise.all([first, second]);
+    expect(acquirePrompt).toHaveBeenCalledTimes(2);
+    expect(releasePrompt).toHaveBeenCalledTimes(2);
     expect(sendSpy).toHaveBeenNthCalledWith(
       1,
       "ses_1",
@@ -557,5 +562,74 @@ describe("routeMessage — agent context", () => {
       "second",
       expect.objectContaining({ media: undefined }),
     );
+  });
+  it("delivers reused exchange replies to the latest destination chat", async () => {
+    deps.sessions.set("111", "ses_1");
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
+      awaitIdle: () => done,
+      acquirePrompt: () => () => undefined,
+      stop: vi.fn(),
+    });
+    const sendSpy = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text) =>
+      Promise.resolve({ sessionId: "ses_1", reply: text, messageId: text }),
+    );
+
+    const first = routeMessage(deps, "111", "chat1", "first");
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    });
+    const second = routeMessage(deps, "111", "chat2", "second");
+    await vi.waitFor(() => {
+      expect(sendSpy).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => {
+      expect(sentMessages).toHaveLength(2);
+    });
+
+    expect(sentMessages).toEqual([
+      { chatId: "chat1", text: "first" },
+      { chatId: "chat2", text: "second" },
+    ]);
+    release();
+    await Promise.all([first, second]);
+  });
+
+  it("does not let an old finalizer delete a same-session replacement", async () => {
+    const manager = new AgentExchangeManager();
+    let releaseFirst!: () => void;
+    const firstDone = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstWatch = {
+      awaitIdle: () => firstDone,
+      acquirePrompt: () => () => undefined,
+      stop: vi.fn(),
+    };
+    const secondWatch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(firstWatch)
+      .mockResolvedValueOnce(secondWatch);
+
+    const first = await manager.acquire(deps, "111", "ses_1", "chat1");
+    first.exchange.stop();
+    const second = await manager.acquire(deps, "111", "ses_1", "chat2");
+    releaseFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const current = await manager.acquire(deps, "111", "ses_1", "chat2");
+    expect(current.created).toBe(false);
+    first.release();
+    second.release();
+    current.release();
+    manager.stop("111", second.exchange);
   });
 });

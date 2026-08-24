@@ -61,7 +61,7 @@ export class TypingPresence {
       });
       await this.waha.sendText(chatId, text);
       if ((this.activeCount.get(chatId) ?? 0) > 0) {
-        await this.waha.startTyping(chatId);
+        await Promise.resolve(this.waha.startTyping(chatId)).catch(logStartTypingFailure);
         this.scheduleRefresh(chatId);
       }
     });

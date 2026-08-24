@@ -81,8 +81,8 @@ export interface RouterDeps {
 // turn twice.
 export interface ActiveAgentExchange {
   readonly sessionId: string;
-  readonly chatId: string;
   readonly done: Promise<void>;
+  acquirePrompt: (chatId: string) => (() => void) | undefined;
   deliver: (messageId: string, text: string) => void;
   stop: () => void;
 }
@@ -95,40 +95,52 @@ export class AgentExchangeManager {
     senderKey: string,
     sessionId: string,
     chatId: string,
-  ): Promise<{ exchange: ActiveAgentExchange; created: boolean }> {
+  ): Promise<{ exchange: ActiveAgentExchange; created: boolean; release: () => void }> {
     const current = this.active.get(senderKey);
-    if (current?.sessionId === sessionId) return { exchange: current, created: false };
+    if (current?.sessionId === sessionId) {
+      const release = current.acquirePrompt(chatId);
+      if (release) return { exchange: current, created: false, release };
+    }
     current?.stop();
 
+    let destinationChatId = chatId;
     const delivered = new Set<string>();
     const onTurn = (messageId: string, turnText: string): void => {
       if (delivered.has(messageId)) return;
       delivered.add(messageId);
-      void deliver(deps, chatId, turnText).catch((err: unknown) => {
+      void deliver(deps, destinationChatId, turnText).catch((err: unknown) => {
         log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
       });
     };
     const watch = await watchOrNoop(deps, sessionId, onTurn);
+    const exchangeRef: { current: ActiveAgentExchange | undefined } = { current: undefined };
     const done = watch.awaitIdle().finally(() => {
-      if (this.active.get(senderKey)?.sessionId === sessionId) this.active.delete(senderKey);
+      if (this.active.get(senderKey) === exchangeRef.current) this.active.delete(senderKey);
       watch.stop();
     });
     const exchange: ActiveAgentExchange = {
       sessionId,
-      chatId,
       done,
+      acquirePrompt: (nextChatId) => {
+        destinationChatId = nextChatId;
+        return watch.acquirePrompt();
+      },
       deliver: onTurn,
       stop: () => {
         watch.stop();
-        if (this.active.get(senderKey)?.sessionId === sessionId) this.active.delete(senderKey);
+        if (this.active.get(senderKey) === exchange) this.active.delete(senderKey);
       },
     };
+    exchangeRef.current = exchange;
     this.active.set(senderKey, exchange);
-    return { exchange, created: true };
+    const release = exchange.acquirePrompt(chatId) ?? (() => undefined);
+    return { exchange, created: true, release };
   }
 
-  stop(senderKey: string): void {
-    this.active.get(senderKey)?.stop();
+  stop(senderKey: string, expected?: ActiveAgentExchange): void {
+    const current = this.active.get(senderKey);
+    if (expected && current !== expected) return;
+    current?.stop();
   }
 }
 
@@ -156,7 +168,11 @@ async function watchOrNoop(
     return await deps.opencode.watchSession(sessionId, onTurn);
   } catch (err) {
     log("watchSession connect failed — continuing without live streaming", err instanceof Error ? err.message : String(err));
-    return { awaitIdle: () => Promise.resolve(), stop: () => undefined };
+    return {
+      awaitIdle: () => Promise.resolve(),
+      acquirePrompt: () => () => undefined,
+      stop: () => undefined,
+    };
   }
 }
 
@@ -181,41 +197,50 @@ async function handleAgent(
   let endTyping: () => Promise<void> = () => Promise.resolve();
   try {
     await deps.senderLock.run(senderKey, async () => {
-      let sessionId = deps.sessions.get(senderKey);
-      if (!sessionId) {
-        sessionId = await deps.opencode.createSession();
-        deps.sessions.set(senderKey, sessionId);
-      }
+      let releasePrompt: (() => void) | undefined;
+      try {
+        let sessionId = deps.sessions.get(senderKey);
+        if (!sessionId) {
+          sessionId = await deps.opencode.createSession();
+          deps.sessions.set(senderKey, sessionId);
+        }
 
-      deps.typing.begin(chatId);
-      endTyping = () => deps.typing.end(chatId);
-      const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
-      exchange = acquired.exchange;
-      if (acquired.created) {
-        cleanupExchange = () => {
-          deps.exchanges.stop(senderKey);
-        };
-      }
-
-      const result = await deps.opencode.send(sessionId, text, {
-        media: extras.media,
-        system: extras.context ? formatSystemContext(extras.context) : undefined,
-      });
-      if (result.sessionId !== sessionId) {
-        // A stale session was recreated inside send(). The old watcher cannot
-        // observe the retried prompt, so replace it with a watcher on the
-        // actual session and deliver the authoritative result below.
-        deps.exchanges.stop(senderKey);
-        deps.sessions.set(senderKey, result.sessionId);
-        const replacement = await deps.exchanges.acquire(deps, senderKey, result.sessionId, chatId);
-        exchange = replacement.exchange;
-        if (replacement.created) {
+        deps.typing.begin(chatId);
+        endTyping = () => deps.typing.end(chatId);
+        const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
+        exchange = acquired.exchange;
+        releasePrompt = acquired.release;
+        if (acquired.created) {
           cleanupExchange = () => {
-            deps.exchanges.stop(senderKey);
+            deps.exchanges.stop(senderKey, exchange);
           };
         }
+
+        const result = await deps.opencode.send(sessionId, text, {
+          media: extras.media,
+          system: extras.context ? formatSystemContext(extras.context) : undefined,
+        });
+        if (result.sessionId !== sessionId) {
+          // A stale session was recreated inside send(). The old watcher cannot
+          // observe the retried prompt, so replace it with a watcher on the
+          // actual session and deliver the authoritative result below.
+          releasePrompt();
+          releasePrompt = undefined;
+          deps.exchanges.stop(senderKey, exchange);
+          deps.sessions.set(senderKey, result.sessionId);
+          const replacement = await deps.exchanges.acquire(deps, senderKey, result.sessionId, chatId);
+          exchange = replacement.exchange;
+          releasePrompt = replacement.release;
+          if (replacement.created) {
+            cleanupExchange = () => {
+              deps.exchanges.stop(senderKey, exchange);
+            };
+          }
+        }
+        exchange.deliver(result.messageId, result.reply);
+      } finally {
+        releasePrompt?.();
       }
-      exchange.deliver(result.messageId, result.reply);
     });
 
     // This wait is deliberately outside senderLock.run(). A background task
