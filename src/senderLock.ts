@@ -9,16 +9,14 @@ export class SenderLock {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    this.locks.set(
-      key,
-      prev.then(() => gate),
-    );
+    const lock = prev.then(() => gate);
+    this.locks.set(key, lock);
     await prev;
     try {
       return await fn();
     } finally {
       release();
-      if (this.locks.get(key) === gate) this.locks.delete(key);
+      if (this.locks.get(key) === lock) this.locks.delete(key);
     }
   }
 }

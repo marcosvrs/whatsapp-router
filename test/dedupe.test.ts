@@ -18,6 +18,12 @@ describe("MessageDedupe", () => {
     dedupe.alreadyProcessed("a", 0);
     expect(dedupe.alreadyProcessed("a", 1001)).toBe(false);
   });
+  it("treats a hit exactly at the ttl as still duplicated", () => {
+    const dedupe = new MessageDedupe(1000);
+    dedupe.alreadyProcessed("a", 0);
+    expect(dedupe.alreadyProcessed("a", 1000)).toBe(true);
+  });
+
 
   it("treats different keys independently", () => {
     const dedupe = new MessageDedupe(1000);

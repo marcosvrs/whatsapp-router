@@ -39,6 +39,11 @@ describe("markdownToWhatsapp", () => {
   it("converts a level-3 header to bold", () => {
     expect(markdownToWhatsapp("### Subheading")).toBe("*Subheading*");
   });
+  it("trims padded headings and only converts complete header lines", () => {
+    expect(markdownToWhatsapp("#   Padded title  \ntext # not a heading")).toBe(
+      "*Padded title*\ntext # not a heading",
+    );
+  });
 
   it("converts a markdown link to 'text: url'", () => {
     expect(markdownToWhatsapp("Check [our docs](https://example.com/docs)")).toBe(
@@ -61,6 +66,15 @@ describe("markdownToWhatsapp", () => {
     expect(result).toContain("*not italic* __not bold__");
     expect(result).toContain("Before");
     expect(result).toContain("After");
+  });
+  it("handles multiple code spans and underscore emphasis", () => {
+    const input = "Run `one` and `two`, then use _italic_ and *italic*.";
+    expect(markdownToWhatsapp(input)).toBe("Run ```one``` and ```two```, then use _italic_ and _italic_.");
+  });
+
+  it("does not span underscore emphasis across newlines and preserves multi-character content", () => {
+    expect(markdownToWhatsapp("_two words_")).toBe("_two words_");
+    expect(markdownToWhatsapp("_first\nsecond_")).toBe("_first\nsecond_");
   });
 
   it("leaves plain text with no markdown completely unchanged", () => {

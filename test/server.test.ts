@@ -136,15 +136,20 @@ function rawRequest(
   method: string,
   body: string,
   headers: Record<string, string> = {},
-): Promise<{ status: number }> {
+): Promise<{ status: number; contentType: string | undefined; responseBody: string }> {
   return new Promise((resolve, reject) => {
     const req = request(
       `${baseUrl}${path}`,
       { method, headers: { "Content-Type": "application/json", ...headers } },
       (res) => {
-        res.resume();
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.on("end", () => {
-          resolve({ status: res.statusCode ?? 0 });
+          resolve({
+            status: res.statusCode ?? 0,
+            contentType: res.headers["content-type"],
+            responseBody: Buffer.concat(chunks).toString("utf8"),
+          });
         });
       },
     );
@@ -153,7 +158,10 @@ function rawRequest(
   });
 }
 
-async function postWebhook(body: string, headers: Record<string, string> = {}): Promise<{ status: number }> {
+async function postWebhook(
+  body: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; contentType: string | undefined; responseBody: string }> {
   const response = await rawRequest("/webhook", "POST", body, headers);
   await new Promise<void>((resolve) => setImmediate(resolve));
   return response;
@@ -188,12 +196,20 @@ describe("server webhook auth", () => {
     const body = "{}";
     const res = await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
     expect(res.status).toBe(200);
+    expect(res.contentType).toContain("application/json");
+    expect(res.responseBody).toBe("{}");
   });
 
   it("rejects a body over the size limit before checking the signature", async () => {
     const oversized = JSON.stringify({ padding: "x".repeat(config.maxBodyBytes + 1) });
     const res = await postWebhook(oversized, { "X-Webhook-Hmac": sign(oversized) });
     expect(res.status).toBe(413);
+  });
+
+  it("accepts a body exactly at the configured size limit", async () => {
+    const atLimit = "x".repeat(config.maxBodyBytes);
+    const res = await postWebhook(atLimit, { "X-Webhook-Hmac": sign(atLimit) });
+    expect(res.status).toBe(200);
   });
 });
 
@@ -288,6 +304,7 @@ describe("server message handling", () => {
         );
       }),
     );
+    const sendSpy = vi.spyOn(deps.router.opencode, "send");
 
     const body = messageBody({
       from: "group@g.us",
@@ -298,6 +315,11 @@ describe("server message handling", () => {
       },
     });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+    expect(sendSpy).toHaveBeenCalledWith(
+      "ses_1",
+      "hello",
+      expect.objectContaining({ media: undefined }),
+    );
 
     expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "hi!" }]);
   });
@@ -468,7 +490,7 @@ describe("server message handling", () => {
     const body = messageBody({
       body: "check this out",
       hasMedia: true,
-      media: { url: "http://waha.test/api/files/m1.jpg", mimetype: "image/jpeg", filename: null },
+      media: { url: "http://waha.test/api/files/m1.jpg", mimetype: null, filename: "photo.jpg" },
     });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
@@ -476,10 +498,43 @@ describe("server message handling", () => {
     expect(capturedBody).toMatchObject({
       parts: [
         { type: "text", text: "check this out" },
-        { type: "file", mime: "image/jpeg", url: "data:image/jpeg;base64,Zm9v" },
+        { type: "file", mime: "application/octet-stream", filename: "photo.jpg", url: "data:application/octet-stream;base64,Zm9v" },
       ],
     });
   });
+  it("does not download a URL when the payload does not mark the message as media", async () => {
+    let capturedParts: { type: string; url?: string }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: unknown) => {
+        const url = requestUrl(input);
+        if (url.endsWith("/event")) return sseConnectedResponse();
+        if (url.endsWith("/session")) {
+          return new Response(JSON.stringify({ id: "ses_1" }), {
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        const parsed = JSON.parse(await (input as Request).clone().text()) as {
+          parts: { type: string; url?: string }[];
+        };
+        capturedParts = parsed.parts;
+        return new Response(JSON.stringify({ info: {}, parts: [{ type: "text", text: "text only" }] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+
+    const body = messageBody({
+      body: "caption",
+      hasMedia: false,
+      media: { url: "http://waha.test/api/files/should-not-download.jpg", mimetype: "image/jpeg" },
+    });
+    await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
+
+    expect(deps.waha.downloadMedia).not.toHaveBeenCalled();
+    expect(capturedParts).toEqual([{ type: "text", text: "caption" }]);
+  });
+
 
   it("processes a media-only message with no caption instead of dropping it", async () => {
     (deps.waha.downloadMedia as ReturnType<typeof vi.fn>).mockResolvedValue("YmFy");
@@ -789,6 +844,7 @@ describe("server message handling", () => {
 
     it("still replies when the recent-history fetch fails", async () => {
       identity.isBotId = (id) => id === "botid";
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
       (deps.waha.fetchRecentMessages as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("waha down"));
       vi.stubGlobal(
         "fetch",
@@ -813,6 +869,8 @@ describe("server message handling", () => {
       await postWebhook(groupMentionBody(), { "X-Webhook-Hmac": sign(groupMentionBody()) });
 
       expect(sentMessages).toEqual([{ chatId: "group@g.us", text: "still works" }]);
+      const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+      expect(logged).toContainEqual(["recent-history fetch failed", "waha down"]);
     });
   });
 
@@ -903,11 +961,12 @@ describe("server message handling", () => {
       }),
     );
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const body = messageBody({ body: "hello" });
+    const text = "x".repeat(250);
+    const body = messageBody({ body: text });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
     const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
-    expect(logged).toContainEqual(["inbound", "111@c.us", '"hello"']);
+    expect(logged).toContainEqual(["inbound", "111@c.us", JSON.stringify(text).slice(0, 200)]);
   });
 });
 

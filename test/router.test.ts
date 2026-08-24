@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OpencodeClient, type OpencodeMediaAttachment } from "../src/integrations/opencode.js";
+import { OpencodeClient, OpencodeSendError, type OpencodeMediaAttachment } from "../src/integrations/opencode.js";
 import { AgentExchangeManager, routeMessage, type RouterDeps } from "../src/router.js";
 import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
@@ -233,9 +233,14 @@ describe("routeMessage — default (agent)", () => {
   });
 
   it("returns a failure message and logs when the opencode call throws", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
     const reply = await agentText(deps, "111", "hi");
     expect(reply).toBe("Agent call failed — check whatsapp-router logs.");
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "opencode call failed",
+      "network down",
+    ]);
   });
 
   it("is case-insensitive and trims surrounding whitespace before forwarding to the agent", async () => {
@@ -248,8 +253,10 @@ describe("routeMessage — default (agent)", () => {
         return Promise.resolve(jsonResponse({ info: {}, parts: [{ type: "text", text: "handled" }] }));
       }),
     );
+    const sendSpy = vi.spyOn(deps.opencode, "send");
     const reply = await agentText(deps, "111", "  hello there  ");
     expect(reply).toBe("handled");
+    expect(sendSpy).toHaveBeenCalledWith("ses_1", "hello there", expect.anything());
   });
 
   it("treats a bare '/new' prefix (e.g. '/newfoo') as agent text, not the reset command", async () => {
@@ -524,10 +531,11 @@ describe("routeMessage — agent context", () => {
     });
     const releasePrompt = vi.fn();
     const acquirePrompt = vi.fn(() => releasePrompt);
+    const markPromptCompleted = vi.fn();
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
       awaitIdle: () => done,
       acquirePrompt,
-      markPromptCompleted: vi.fn(),
+      markPromptCompleted,
       stop: vi.fn(),
     });
     const sendSpy = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text) =>
@@ -550,6 +558,7 @@ describe("routeMessage — agent context", () => {
     release();
     await Promise.all([first, second]);
     expect(acquirePrompt).toHaveBeenCalledTimes(2);
+    expect(markPromptCompleted).toHaveBeenCalledTimes(2);
     expect(releasePrompt).toHaveBeenCalledTimes(2);
     expect(sendSpy).toHaveBeenNthCalledWith(
       1,
@@ -636,6 +645,26 @@ describe("routeMessage — agent context", () => {
     current.release();
     manager.stop("111", second.exchange);
   });
+
+  it("does not stop the current exchange when an old exchange is supplied", async () => {
+    const manager = new AgentExchangeManager();
+    const firstStop = vi.fn();
+    const currentStop = vi.fn();
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: currentStop,
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const first = await manager.acquire(deps, "111", "ses_1", "chat1");
+    const staleExchange = { ...first.exchange, stop: firstStop };
+    manager.stop("111", staleExchange);
+    expect(firstStop).not.toHaveBeenCalled();
+    expect(currentStop).not.toHaveBeenCalled();
+    manager.stop("111", first.exchange);
+    expect(currentStop).toHaveBeenCalledTimes(1);
+  });
   it("keeps streamed turns in their originating chat", async () => {
     deps.sessions.set("111", "ses_1");
     let release!: () => void;
@@ -680,6 +709,7 @@ describe("routeMessage — agent context", () => {
   });
 
   it("retries a delivery when the first attempt fails", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const send = vi
       .spyOn(deps.typing, "send")
       .mockRejectedValueOnce(new Error("temporary WAHA failure"))
@@ -698,7 +728,34 @@ describe("routeMessage — agent context", () => {
     acquired.exchange.deliver("msg_1", "reply", "chat1");
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenNthCalledWith(1, "chat1", "reply");
+      expect(send).toHaveBeenNthCalledWith(2, "chat1", "reply");
     });
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "failed to deliver agent turn",
+      "temporary WAHA failure",
+    ]);
+    manager.stop("111", acquired.exchange);
+  });
+
+  it("does not retry a delivery failure when no fallback turn exists", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockRejectedValue(new Error("permanent WAHA failure"));
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("msg_1", "reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    await Promise.resolve();
+    expect(send).toHaveBeenCalledTimes(1);
     manager.stop("111", acquired.exchange);
   });
 
@@ -753,5 +810,94 @@ describe("routeMessage — agent context", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(watchedSessions).toEqual(["ses_stale", "ses_new"]);
     expect(deps.sessions.get("111")).toBe("ses_new");
+  });
+  it("deduplicates a delivered message after the first send succeeds", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    const watch = {
+      awaitIdle: () => Promise.resolve(),
+      acquirePrompt: () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockImplementation(() => Promise.resolve(watch));
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", CHAT_ID);
+
+    acquired.exchange.deliver("msg_1", "reply", CHAT_ID);
+    acquired.exchange.deliver("msg_1", "reply", CHAT_ID);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    acquired.exchange.deliver("msg_1", "reply", CHAT_ID);
+    expect(send).toHaveBeenCalledTimes(1);
+    acquired.release();
+    manager.stop("111", acquired.exchange);
+  });
+
+  it("replaces a watcher when a reused session cannot acquire a prompt lease", async () => {
+    const firstStop = vi.fn();
+    const secondStop = vi.fn();
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: firstStop,
+    };
+    const replacementWatch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: secondStop,
+    };
+    vi.spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(watch)
+      .mockResolvedValueOnce(replacementWatch);
+    const manager = new AgentExchangeManager();
+    await manager.acquire(deps, "111", "ses_1", CHAT_ID);
+    const second = await manager.acquire(deps, "111", "ses_1", "chat2");
+
+    expect(second.created).toBe(true);
+    expect(firstStop).toHaveBeenCalledTimes(1);
+    manager.stop("111", second.exchange);
+  });
+
+  it("cancels a pending destination for a known prompt rejection", async () => {
+    deps.sessions.set("111", "ses_1");
+    const releasePrompt = vi.fn();
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => releasePrompt,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    });
+    vi.spyOn(deps.opencode, "send").mockRejectedValue(new OpencodeSendError(500));
+
+    await routeMessage(deps, "111", CHAT_ID, "hi");
+
+    expect(releasePrompt).toHaveBeenCalledWith(true);
+  });
+
+  it("replaces the watcher when a send result reports a new session", async () => {
+    deps.sessions.set("111", "ses_stale");
+    const watchedSessions: string[] = [];
+    const watch = {
+      awaitIdle: () => Promise.resolve(),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockImplementation((sessionId) => {
+      watchedSessions.push(sessionId);
+      return Promise.resolve(watch);
+    });
+    vi.spyOn(deps.opencode, "send").mockResolvedValue({
+      sessionId: "ses_new",
+      reply: "ok",
+      messageId: "msg_1",
+    });
+
+    await routeMessage(deps, "111", CHAT_ID, "hi");
+
+    expect(watchedSessions).toEqual(["ses_stale", "ses_new"]);
   });
 });

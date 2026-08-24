@@ -36,6 +36,7 @@ describe("TypingPresence", () => {
     expect(waha.startTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
   });
   it("bounds a hung initial typing request before sending", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const waha = fakeWaha();
     waha.startTyping = vi
       .fn()
@@ -49,7 +50,27 @@ describe("TypingPresence", () => {
     await vi.advanceTimersByTimeAsync(PRESENCE_REQUEST_TIMEOUT_MS);
     await expect(sendPromise).resolves.toBeUndefined();
     expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "startTyping failed",
+      "startTyping timed out",
+    ]);
     await typing.end("chat1");
+  });
+
+  it("bounds a hung stopTyping request and still sends the message", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const waha = fakeWaha();
+    waha.stopTyping = vi.fn().mockImplementation(() => new Promise<void>(() => undefined));
+    const typing = new TypingPresence(waha);
+
+    const sendPromise = typing.send("chat1", "hello");
+    await vi.advanceTimersByTimeAsync(PRESENCE_REQUEST_TIMEOUT_MS);
+    await expect(sendPromise).resolves.toBeUndefined();
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "stopTyping failed",
+      "stopTyping timed out",
+    ]);
   });
 
 
@@ -65,6 +86,49 @@ describe("TypingPresence", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(waha.startTyping).toHaveBeenCalledTimes(3);
   });
+  it("swallows a periodic refresh failure", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const waha = fakeWaha();
+    waha.startTyping = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("refresh failed"));
+    const typing = new TypingPresence(waha);
+    typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await typing.end("chat1");
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "startTyping failed",
+      "refresh failed",
+    ]);
+  });
+
+  it("swallows a stop failure during end", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const waha = fakeWaha();
+    waha.stopTyping = vi.fn().mockRejectedValueOnce(new Error("stop failed"));
+    const typing = new TypingPresence(waha);
+    await typing.end("chat1");
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "stopTyping failed",
+      "stop failed",
+    ]);
+  });
+
+  it("handles a typing lock failure during begin", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const typing = new TypingPresence(fakeWaha());
+    const failingLock = {
+      run: vi.fn().mockRejectedValue(new Error("lock failed")),
+    };
+    Object.defineProperty(typing, "perChat", { value: failingLock });
+    typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failingLock.run).toHaveBeenCalledWith("chat1", expect.any(Function));
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "TypingPresence.begin failed",
+      "lock failed",
+    ]);
+  });
+
 
   it("brackets a send with stopTyping then sendText then startTyping", async () => {
     const calls: string[] = [];
@@ -109,6 +173,7 @@ describe("TypingPresence", () => {
     const waha = fakeWaha();
     const typing = new TypingPresence(waha);
     await typing.send("chat1", "hello");
+    expect(vi.getTimerCount()).toBe(0);
 
     expect(waha.stopTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
     expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
@@ -119,6 +184,7 @@ describe("TypingPresence", () => {
     expect(waha.startTyping).not.toHaveBeenCalled();
   });
   it("still sends the message when stopTyping fails", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const waha = fakeWaha();
     (waha.stopTyping as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("WAHA unavailable"));
     const typing = new TypingPresence(waha);
@@ -126,8 +192,13 @@ describe("TypingPresence", () => {
     await typing.send("chat1", "hello");
 
     expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "stopTyping failed",
+      "WAHA unavailable",
+    ]);
   });
   it("keeps a successful send successful when typing restart fails", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const waha = fakeWaha();
     const startTyping = vi
       .fn()
@@ -141,6 +212,10 @@ describe("TypingPresence", () => {
     await vi.advanceTimersByTimeAsync(0);
     await expect(typing.send("chat1", "hello")).resolves.toBeUndefined();
     expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "startTyping failed",
+      "WAHA unavailable",
+    ]);
 
     await vi.advanceTimersByTimeAsync(20_000);
     expect(startTyping).toHaveBeenCalledTimes(3);

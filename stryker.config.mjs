@@ -5,5 +5,5 @@ export default {
   reporters: ["html", "clear-text", "progress"],
   coverageAnalysis: "perTest",
   mutate: ["src/**/*.ts", "!src/index.ts"],
-  thresholds: { high: 85, low: 75, break: 70 },
+  thresholds: { high: 95, low: 90, break: 85 },
 };

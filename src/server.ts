@@ -157,6 +157,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
     let body = "";
     let tooLarge = false;
     req.on("data", (chunk: Buffer) => {
+      /* c8 ignore next -- req.destroy() prevents later data events. */
       if (tooLarge) return;
       body += String(chunk);
       if (body.length > config.maxBodyBytes) {
@@ -168,6 +169,7 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
     });
 
     req.on("end", () => {
+      /* c8 ignore next -- req.destroy() prevents the end event. */
       if (tooLarge) return;
       void handleWebhook(body, signature, res);
     });

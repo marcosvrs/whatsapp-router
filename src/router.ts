@@ -136,8 +136,9 @@ export class AgentExchangeManager {
         .catch((err: unknown) => {
           inFlight.delete(messageId);
           log("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
+          const fallback: PendingDelivery | undefined = delivery.fallback;
           if (delivery.fallback) {
-            enqueueDelivery(messageId, delivery.fallback.text, delivery.fallback.chatId);
+            enqueueDelivery(messageId, fallback?.text ?? "", fallback?.chatId ?? "");
           }
         });
     };

@@ -10,9 +10,17 @@ const createOpencodeClient = vi.fn(() => ({
 
 vi.mock("@opencode-ai/sdk", () => ({ createOpencodeClient }));
 
-const { OpencodeClient, IDLE_GRACE_MS, MAX_WAIT_MS, SSE_CONNECT_TIMEOUT_MS } = await import(
-  "../../src/integrations/opencode.js",
-);
+const {
+  OpencodeClient,
+  OpencodeSendError,
+  IDLE_GRACE_MS,
+  MAX_WAIT_MS,
+  SSE_CONNECT_TIMEOUT_MS,
+  backgroundWorkState,
+  errorMessage,
+  isMessagePartDeltaEvent,
+  mayBeBackgroundMarkerPrefix,
+} = await import("../../src/integrations/opencode.js");
 
 function ok<T>(data: T, status = 200): { data: T; error: undefined; response: { status: number } } {
   return { data, error: undefined, response: { status } };
@@ -356,6 +364,30 @@ describe("OpencodeClient.send", () => {
     const result = await client().send("ses_1", "hi");
     expect(result.reply).toBe("real");
   });
+  it("trims and filters successful text parts", async () => {
+    sessionPrompt.mockResolvedValue(
+      ok({
+        info: {},
+        parts: [
+          { type: "text", text: "  hello  " },
+          { type: "text", text: "" },
+          { type: "step-finish", text: "must be ignored" },
+          { type: "text", text: "world" },
+        ],
+      }),
+    );
+    const result = await client().send("ses_1", "hi");
+    expect(result.reply).toBe("hello  \nworld");
+  });
+
+  it("falls back to the error name for malformed error data", async () => {
+    sessionPrompt.mockResolvedValue(
+      ok({ info: { name: "APIError", error: { name: "APIError", data: { message: 42 } } }, parts: [] }),
+    );
+    const result = await client().send("ses_1", "hi");
+    expect(result.reply).toBe("Agent error: APIError");
+  });
+
 
   it("creates a fresh session and retries once on a 404 (stale session)", async () => {
     sessionPrompt
@@ -435,6 +467,65 @@ describe("OpencodeClient.send", () => {
   });
 });
 
+describe("background task classifiers", () => {
+  it("distinguish progress, completion, ordinary text, and marker prefixes", () => {
+    expect(backgroundWorkState("  [BACKGROUND TASK RESULT READY] work")).toBe(true);
+    expect(backgroundWorkState("  [ALL BACKGROUND TASKS COMPLETE] done")).toBe(false);
+    expect(backgroundWorkState("ordinary message")).toBeUndefined();
+    expect(mayBeBackgroundMarkerPrefix("  [BACKGROUND TASK RESULT READY]")).toBe(true);
+    expect(mayBeBackgroundMarkerPrefix("  [BACKGROUND TASK RETRYING]")).toBe(true);
+    expect(mayBeBackgroundMarkerPrefix("  [ALL BACKGROUND TASKS COMPLETE]")).toBe(true);
+    expect(mayBeBackgroundMarkerPrefix("ordinary message")).toBe(false);
+    expect(mayBeBackgroundMarkerPrefix("[BACKGROUND TASK RES")).toBe(true);
+    expect(mayBeBackgroundMarkerPrefix("[BACKGROUND TASK RESULT READY] details")).toBe(true);
+    expect(mayBeBackgroundMarkerPrefix("TASKS COMPLETE]")).toBe(false);
+    expect(mayBeBackgroundMarkerPrefix("prefix [ALL BACKGROUND TASKS COMPLETE]")).toBe(false);
+  });
+
+  it("uses an error detail only when it is a string message", () => {
+    expect(errorMessage({ name: "E", data: { message: "detail" } } as never)).toBe("detail");
+    for (const data of [undefined, null, false, 0, "detail", { message: 42 }, { other: "detail" }]) {
+      expect(errorMessage({ name: "E", data } as never)).toBe("E");
+    }
+  });
+  it("names send errors with their integration class", () => {
+    const error = new OpencodeSendError(502);
+    expect(error.name).toBe("OpencodeSendError");
+    expect(error.status).toBe(502);
+    expect(error.message).toBe("opencode message send failed: 502");
+  });
+
+});
+describe("isMessagePartDeltaEvent", () => {
+  it("accepts a complete delta payload and rejects malformed shapes", () => {
+    const valid = {
+      type: "message.part.delta",
+      properties: {
+        sessionID: "ses_1",
+        messageID: "msg_1",
+        partID: "part_1",
+        field: "text",
+        delta: "hello",
+      },
+    };
+    expect(isMessagePartDeltaEvent(valid)).toBe(true);
+    expect(isMessagePartDeltaEvent(null)).toBe(false);
+    expect(isMessagePartDeltaEvent("message.part.delta")).toBe(false);
+    expect(isMessagePartDeltaEvent({ type: "other", properties: valid.properties })).toBe(false);
+    expect(isMessagePartDeltaEvent({ type: valid.type })).toBe(false);
+    expect(isMessagePartDeltaEvent({ type: valid.type, properties: null })).toBe(false);
+    expect(isMessagePartDeltaEvent({ type: valid.type, properties: "bad" })).toBe(false);
+    for (const field of ["sessionID", "messageID", "partID", "field", "delta"]) {
+      expect(
+        isMessagePartDeltaEvent({
+          type: valid.type,
+          properties: { ...valid.properties, [field]: 42 },
+        }),
+      ).toBe(false);
+    }
+  });
+});
+
 describe("OpencodeClient.watchSession", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -463,6 +554,7 @@ describe("OpencodeClient.watchSession", () => {
   it("delivers each completed assistant turn as it streams in, using the latest text per part", async () => {
     const source = fakeEventSource();
     connectSource(source);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const onMessage = vi.fn();
     const { awaitIdle, stop } = await client().watchSession("ses_1", onMessage);
 
@@ -479,6 +571,7 @@ describe("OpencodeClient.watchSession", () => {
     expect(onMessage).toHaveBeenNthCalledWith(2, "msg_2", "second turn");
     stop();
     await awaitIdle();
+    expect(logSpy).not.toHaveBeenCalled();
   });
   it("accumulates text from message.part.delta events", async () => {
     const source = fakeEventSource();
@@ -619,6 +712,11 @@ describe("OpencodeClient.watchSession", () => {
     source.push(
       textPartUpdated("marker_direct", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"),
     );
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_direct_retry", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("marker_direct_retry", "part_retry", "ses_1", "[BACKGROUND TASK RETRYING] still in progress"));
     releaseDirect?.();
 
     const releaseGroup = watch.acquirePrompt("group");
@@ -638,6 +736,21 @@ describe("OpencodeClient.watchSession", () => {
       properties: { info: { id: "marker_group", sessionID: "ses_1", role: "user" } },
     });
     source.push(textPartUpdated("marker_group", "part_2", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_group_round", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("marker_group_round", "part_round", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "complete_direct", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("complete_direct", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "complete_group", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("complete_group", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
     source.push(textPartUpdated("assistant_direct", "part_3", "ses_1", "direct background"));
     source.push(assistantFinished("assistant_direct", "ses_1", "stop", "marker_direct"));
     source.push(textPartUpdated("assistant_group", "part_4", "ses_1", "group background"));
@@ -652,6 +765,96 @@ describe("OpencodeClient.watchSession", () => {
   });
 
 
+  it("settles after a malformed SSE event", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle } = await client().watchSession("ses_1", vi.fn());
+    source.push(null);
+    await awaitIdle();
+  });
+
+  it("logs SSE retry errors before the stream ends", async () => {
+    const source = fakeEventSource();
+
+    eventSubscribe.mockImplementation((options: { onSseError?: (error: unknown) => void }) => {
+      options.onSseError?.(new Error("retry"));
+      source.push({ type: "server.connected", properties: {} });
+      source.end();
+      return { stream: source.stream };
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { awaitIdle } = await client().watchSession("ses_1", vi.fn());
+    await awaitIdle();
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["watchSession SSE connect attempt failed, retrying", "retry"]);
+    expect(logged).toContainEqual([
+      "watchSession stream ended after connection retries were exhausted — may not reflect the session actually being done",
+    ]);
+    logSpy.mockRestore();
+  });
+
+  it("rejects malformed delta payloads before processing valid text", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    const invalidEvents = [
+      { type: "message.part.delta", properties: null },
+      { type: "message.part.delta", properties: { sessionID: "ses_1" } },
+      {
+        type: "message.part.delta",
+        properties: { sessionID: "ses_1", messageID: "msg_bad", partID: "part", field: "text", delta: 42 },
+      },
+      {
+        type: "message.part.delta",
+        properties: { sessionID: 1, messageID: "msg_bad", partID: "part", field: "text", delta: "bad" },
+      },
+    ];
+    for (const event of invalidEvents) source.push(event);
+    source.push(partDelta("msg_1", "part_1", "ses_1", "good"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("msg_1", "good");
+    });
+    stop();
+  });
+
+  it("cancels an idle candidate when a relevant event arrives", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    source.push(textPartUpdated("msg_1", "part_1", "ses_1", "done"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(500);
+    source.push({ type: "message.updated", properties: { info: { id: "noise", sessionID: "ses_1", role: "assistant" } } });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    stop();
+    await awaitIdle();
+  });
+
+  it("cleans an ordinary injected message after its parts arrive", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { stop } = await client().watchSession("ses_1", vi.fn());
+    source.push({ type: "message.updated", properties: { info: { id: "plugin", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("plugin", "part_empty", "ses_1", ""));
+    source.push(textPartUpdated("plugin", "part_1", "ses_1", "ordinary plugin note"));
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+  });
+
+  it("stops before processing events queued after abort", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    watch.stop();
+    expect(watch.acquirePrompt("chat1")).toBeUndefined();
+    source.push({ type: "server.connected", properties: {} });
+    await watch.awaitIdle();
+  });
+
   it("ignores events for a different session id", async () => {
     const source = fakeEventSource();
     connectSource(source);
@@ -659,6 +862,7 @@ describe("OpencodeClient.watchSession", () => {
     const { stop } = await client().watchSession("ses_1", onMessage);
     source.push(textPartUpdated("msg_1", "prt_1", "ses_other", "not for us"));
     source.push(assistantFinished("msg_1", "ses_other"));
+    source.push(sessionStatus("ses_other"));
     await vi.advanceTimersByTimeAsync(0);
     expect(onMessage).not.toHaveBeenCalled();
     stop();
@@ -724,6 +928,16 @@ describe("OpencodeClient.watchSession", () => {
       resolved = true;
     });
     source.push({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "ses_1",
+        messageID: "msg_1",
+        partID: "tool_1",
+        field: "tool_input",
+        delta: "{}",
+      },
+    });
+    source.push({
       type: "message.part.updated",
       properties: {
         part: { id: "tool_1", messageID: "msg_1", sessionID: "ses_1", type: "tool" },
@@ -736,6 +950,22 @@ describe("OpencodeClient.watchSession", () => {
     expect(resolved).toBe(true);
     stop();
   });
+  it("settles through the quiet timer after terminal activity", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    source.push(textPartUpdated("msg_1", "part_1", "ses_1", "done"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    source.push({ type: "message.updated", properties: { info: { id: "noise", sessionID: "ses_1", role: "user" } } });
+    await vi.advanceTimersByTimeAsync(IDLE_GRACE_MS + 1);
+    await awaitIdle();
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "watchSession",
+      "quiet with no activity for the grace window",
+    ]);
+    stop();
+  });
 
   it("processes background markers when message.updated precedes its parts", async () => {
     const source = fakeEventSource();
@@ -746,7 +976,8 @@ describe("OpencodeClient.watchSession", () => {
       resolved = true;
     });
     source.push({ type: "message.updated", properties: { info: { id: "user_1", sessionID: "ses_1", role: "user" } } });
-    source.push(textPartUpdated("user_1", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
+    source.push(partDelta("user_1", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
+    source.push({ type: "message.updated", properties: { info: { id: "user_1", sessionID: "ses_1", role: "user" } } });
     source.push(sessionIdle("ses_1"));
     await vi.advanceTimersByTimeAsync(1_001);
     expect(resolved).toBe(false);
@@ -858,6 +1089,7 @@ describe("OpencodeClient.watchSession", () => {
     await vi.advanceTimersByTimeAsync(1_001);
     expect(resolved).toBe(false);
     release?.();
+    release?.();
     await vi.advanceTimersByTimeAsync(1_001);
     expect(resolved).toBe(true);
     stop();
@@ -887,6 +1119,7 @@ describe("OpencodeClient.watchSession", () => {
   it("hits the hard ceiling even with continuous activity", async () => {
     const source = fakeEventSource();
     connectSource(source);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
     let resolved = false;
     void awaitIdle().then(() => {
@@ -902,6 +1135,10 @@ describe("OpencodeClient.watchSession", () => {
     expect(resolved).toBe(false);
     await vi.advanceTimersByTimeAsync(MAX_WAIT_MS - elapsed + 1);
     expect(resolved).toBe(true);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "watchSession",
+      "hit max wait ceiling",
+    ]);
     stop();
   });
 
@@ -928,21 +1165,32 @@ describe("OpencodeClient.watchSession", () => {
     });
     stop();
   });
+
   it("rejects when the initial SSE connection fails and cleans up timers", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     eventSubscribe.mockRejectedValue(new Error("connection reset"));
     await expect(client().watchSession("ses_1", vi.fn())).rejects.toThrow("connection reset");
     expect(vi.getTimerCount()).toBe(0);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "watchSession",
+      "SSE subscription setup failed",
+    ]);
   });
+
   it("times out when the actual SSE stream never connects", async () => {
     const source = fakeEventSource();
     connectSource(source, false);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const watchPromise = client().watchSession("ses_1", vi.fn());
     const rejection = expect(watchPromise).rejects.toThrow("SSE connection timed out");
     await vi.advanceTimersByTimeAsync(SSE_CONNECT_TIMEOUT_MS);
     await rejection;
     expect(vi.getTimerCount()).toBe(0);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "watchSession",
+      "SSE connection setup timed out",
+    ]);
   });
-
 
   it("logs and settles cleanly when the stream errors after connecting", async () => {
     const throwingStream = {
@@ -966,8 +1214,9 @@ describe("OpencodeClient.watchSession", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const { awaitIdle } = await client().watchSession("ses_1", vi.fn());
     await awaitIdle();
-    expect(logSpy.mock.calls.some((call) => call[1] === "watchSession stream error")).toBe(true);
-    logSpy.mockRestore();
+    const logged = logSpy.mock.calls.map((call: unknown[]) => call.slice(1));
+    expect(logged).toContainEqual(["watchSession stream error", "dropped mid-stream"]);
+    expect(logged).toContainEqual(["watchSession", "SSE stream ended"]);
   });
 
   it("ignores an unhandled event type", async () => {

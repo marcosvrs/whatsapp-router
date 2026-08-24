@@ -94,6 +94,17 @@ describe("WahaClient.startTyping", () => {
     expect(JSON.parse(init.body as string)).toEqual({ session: "MySession", chatId: "111@c.us" });
   });
 
+  it("passes an abort signal through to startTyping when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+
+    await new WahaClient("http://waha.test", "key123", "MySession").startTyping("111@c.us", signal);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBe(signal);
+  });
+
   it("logs on failure", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));

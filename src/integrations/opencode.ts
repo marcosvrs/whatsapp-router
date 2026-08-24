@@ -52,7 +52,7 @@ export interface OpencodeSendResult {
 // Every error variant has a `name`; only some also have a string `data.message`
 // (MessageOutputLengthError's `data` is an untyped bag) — narrow explicitly
 // rather than assume the shape.
-function errorMessage(error: NonNullable<AssistantMessage["error"]>): string {
+export function errorMessage(error: NonNullable<AssistantMessage["error"]>): string {
   const data: unknown = error.data;
   if (
     data &&
@@ -85,7 +85,7 @@ interface MessagePartDeltaEvent {
   };
 }
 
-function isMessagePartDeltaEvent(event: unknown): event is MessagePartDeltaEvent {
+export function isMessagePartDeltaEvent(event: unknown): event is MessagePartDeltaEvent {
   if (!event || typeof event !== "object") return false;
   const candidate = event as { type?: unknown; properties?: unknown };
   if (candidate.type !== "message.part.delta" || !candidate.properties || typeof candidate.properties !== "object") {
@@ -108,17 +108,20 @@ const BACKGROUND_TASK_PROGRESS_MARKERS = [
 ] as const;
 const BACKGROUND_TASK_COMPLETE_MARKER = "[ALL BACKGROUND TASKS COMPLETE]";
 
-function backgroundWorkState(text: string): boolean | undefined {
+export function backgroundWorkState(text: string): boolean | undefined {
   const normalized = text.trim();
   if (normalized.startsWith(BACKGROUND_TASK_COMPLETE_MARKER)) return false;
   if (BACKGROUND_TASK_PROGRESS_MARKERS.some((marker) => normalized.startsWith(marker))) return true;
   return undefined;
 }
-function mayBeBackgroundMarkerPrefix(text: string): boolean {
+export function mayBeBackgroundMarkerPrefix(text: string): boolean {
   const normalized = text.trim();
   if (!normalized) return true;
-  return [BACKGROUND_TASK_COMPLETE_MARKER, ...BACKGROUND_TASK_PROGRESS_MARKERS].some(
-    (marker) => marker.startsWith(normalized) || normalized.startsWith(marker),
+  return (
+    normalized.length > 0 &&
+    [BACKGROUND_TASK_COMPLETE_MARKER, ...BACKGROUND_TASK_PROGRESS_MARKERS].some(
+      (marker) => marker.startsWith(normalized) || normalized.startsWith(marker),
+    )
   );
 }
 
@@ -379,8 +382,9 @@ export class OpencodeClient {
         }
         backgroundWorkPending = unassignedBackgroundPending || backgroundDestinations.some((item) => item.pending);
       }
+      const markerPrefix = mayBeBackgroundMarkerPrefix(text);
       if (!text.trim()) return false;
-      return isRouterPrompt || state !== undefined || !mayBeBackgroundMarkerPrefix(text);
+      return isRouterPrompt || state !== undefined || !markerPrefix;
     };
 
 

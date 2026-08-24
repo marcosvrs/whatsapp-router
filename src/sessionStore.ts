@@ -6,8 +6,8 @@ interface SessionEntry {
   sessionId: string;
 }
 
-function isSessionRecord(value: unknown): value is Record<string, SessionEntry> {
-  return typeof value === "object" && value !== null;
+export function isSessionRecord(value: unknown): value is Record<string, SessionEntry> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function loadFromDisk(filePath: string): Map<string, SessionEntry> {

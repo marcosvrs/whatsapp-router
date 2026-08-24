@@ -66,6 +66,15 @@ describe("Identity.ensureLidMap / resolvePhone", () => {
     await identity.ensureLidMap();
     expect(fetchGroups).toHaveBeenCalledTimes(1);
   });
+  it("does not refresh groups at the exact ttl boundary", async () => {
+    vi.useFakeTimers();
+    const fetchGroups = vi.fn().mockResolvedValue({});
+    const identity = new Identity(fakeWaha({ fetchGroups }));
+    await identity.ensureLidMap();
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    await identity.ensureLidMap();
+    expect(fetchGroups).toHaveBeenCalledTimes(1);
+  });
 
   it("re-fetches groups once the ttl has elapsed", async () => {
     vi.useFakeTimers();
@@ -124,7 +133,7 @@ describe("Identity.getGroupName", () => {
 
   it("skips groups with no subject", async () => {
     const groups: Record<string, WahaGroup> = {
-      "g1@g.us": { participants: [] },
+      "g1@g.us": {},
     };
     const identity = new Identity(fakeWaha({ fetchGroups: vi.fn().mockResolvedValue(groups) }));
     await identity.ensureLidMap();
@@ -159,9 +168,23 @@ describe("Identity.ensureBotIds / isBotId", () => {
   });
 
   it("treats a null session info response as not-yet-loaded", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const identity = new Identity(fakeWaha({ fetchSessionInfo: vi.fn().mockResolvedValue(null) }));
     await identity.ensureBotIds();
     expect(identity.isBotId("anything")).toBe(false);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).not.toContainEqual(
+      expect.arrayContaining(["bot ids load failed"]),
+    );
+  });
+  it("does not treat a missing me object as a failed bot-id load", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const identity = new Identity(fakeWaha({ fetchSessionInfo: vi.fn().mockResolvedValue({}) }));
+    await expect(identity.ensureBotIds()).resolves.toBeUndefined();
+    expect(identity.isBotId("anything")).toBe(false);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual(["bot ids loaded", ""]);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).not.toContainEqual(
+      expect.arrayContaining(["bot ids load failed"]),
+    );
   });
 
   it("retries fetchSessionInfo on a later call after a null response", async () => {

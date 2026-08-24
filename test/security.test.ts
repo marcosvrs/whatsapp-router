@@ -18,6 +18,10 @@ describe("safeEqual", () => {
   it("returns false when the first value is undefined", () => {
     expect(safeEqual(undefined, "secret")).toBe(false);
   });
+
+  it("does not substitute a value for an undefined secret", () => {
+    expect(safeEqual(undefined, "Stryker was here")).toBe(false);
+  });
 });
 
 describe("validWebhookSignature", () => {
@@ -36,6 +40,10 @@ describe("validWebhookSignature", () => {
   it("rejects a signature computed with the wrong secret", () => {
     const signature = createHmac("sha512", "wrong-secret").update(body).digest("hex");
     expect(validWebhookSignature(body, signature, secret)).toBe(false);
+  });
+
+  it("rejects a signature with an unexpected length without invoking timingSafeEqual", () => {
+    expect(validWebhookSignature(body, "wrong-length", secret)).toBe(false);
   });
 
   it("rejects a signature for a tampered body", () => {
