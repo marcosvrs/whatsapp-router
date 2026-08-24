@@ -82,7 +82,8 @@ export interface RouterDeps {
 export interface ActiveAgentExchange {
   readonly sessionId: string;
   readonly done: Promise<void>;
-  acquirePrompt: (chatId: string) => (() => void) | undefined;
+  acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
+  markPromptCompleted: () => void;
   deliver: (messageId: string, text: string, chatId: string) => void;
   stop: () => void;
 }
@@ -101,7 +102,11 @@ export class AgentExchangeManager {
     senderKey: string,
     sessionId: string,
     chatId: string,
-  ): Promise<{ exchange: ActiveAgentExchange; created: boolean; release: () => void }> {
+  ): Promise<{
+    exchange: ActiveAgentExchange;
+    created: boolean;
+    release: (cancel?: boolean) => void;
+  }> {
     const current = this.active.get(senderKey);
     if (current?.sessionId === sessionId) {
       const release = current.acquirePrompt(chatId);
@@ -147,6 +152,9 @@ export class AgentExchangeManager {
       sessionId,
       done,
       acquirePrompt: (nextChatId) => watch.acquirePrompt(nextChatId),
+      markPromptCompleted: () => {
+        watch.markPromptCompleted();
+      },
       deliver: (messageId, text, destinationChatId) => {
         enqueueDelivery(messageId, text, destinationChatId);
       },
@@ -195,6 +203,7 @@ async function watchOrNoop(
     return {
       awaitIdle: () => Promise.resolve(),
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: () => undefined,
       stop: () => undefined,
     };
   }
@@ -220,7 +229,7 @@ async function handleAgent(
   let endTyping: () => Promise<void> = () => Promise.resolve();
   try {
     await deps.senderLock.run(senderKey, async () => {
-      let releasePrompt: () => void = () => undefined;
+      let releasePrompt: (cancel?: boolean) => void = () => undefined;
       try {
         let sessionId = deps.sessions.get(senderKey);
         if (!sessionId) {
@@ -235,7 +244,7 @@ async function handleAgent(
         releasePrompt = acquired.release;
 
         const replaceExchange = async (nextSessionId: string): Promise<void> => {
-          releasePrompt();
+          releasePrompt(true);
           deps.exchanges.stop(senderKey, exchange);
           deps.sessions.set(senderKey, nextSessionId);
           const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
@@ -251,6 +260,7 @@ async function handleAgent(
         if (result.sessionId !== exchange.sessionId) {
           await replaceExchange(result.sessionId);
         }
+        exchange.markPromptCompleted();
         exchange.deliver(result.messageId, result.reply, chatId);
       } finally {
         releasePrompt();

@@ -20,8 +20,8 @@ export interface WahaSessionInfo {
 
 export interface WahaClientLike {
   sendText: (chatId: string, text: string, id?: string) => Promise<void>;
-  startTyping: (chatId: string) => Promise<void>;
-  stopTyping: (chatId: string) => Promise<void>;
+  startTyping: (chatId: string, signal?: AbortSignal) => Promise<void>;
+  stopTyping: (chatId: string, signal?: AbortSignal) => Promise<void>;
   markChatRead: (chatId: string) => Promise<void>;
   sendReaction: (messageId: string, reaction: string) => Promise<void>;
   editMessage: (chatId: string, messageId: string, text: string) => Promise<void>;
@@ -38,11 +38,12 @@ export class WahaClient implements WahaClientLike {
     private readonly session: string,
   ) {}
 
-  private call(method: string, path: string, body: unknown): Promise<Response> {
+  private call(method: string, path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
     return fetch(`${this.baseUrl}${path}`, {
       method,
       headers: { "Content-Type": "application/json", "X-Api-Key": this.apiKey },
       body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     });
   }
 
@@ -62,16 +63,16 @@ export class WahaClient implements WahaClientLike {
     await this.logIfFailed("sendText", res);
   }
 
-  async startTyping(chatId: string): Promise<void> {
-    const res = await this.call("POST", "/api/startTyping", { session: this.session, chatId });
+  async startTyping(chatId: string, signal?: AbortSignal): Promise<void> {
+    const res = await this.call("POST", "/api/startTyping", { session: this.session, chatId }, signal);
     await this.logIfFailed("startTyping", res);
   }
 
   // WAHA's own docs recommend pairing this with startTyping — startTyping,
   // wait, stopTyping, then sendText — to avoid looking spammy. Confirmed live
   // against this WAHA instance (2026.7.2): returns 201.
-  async stopTyping(chatId: string): Promise<void> {
-    const res = await this.call("POST", "/api/stopTyping", { session: this.session, chatId });
+  async stopTyping(chatId: string, signal?: AbortSignal): Promise<void> {
+    const res = await this.call("POST", "/api/stopTyping", { session: this.session, chatId }, signal);
     await this.logIfFailed("stopTyping", res);
   }
 

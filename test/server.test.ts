@@ -397,7 +397,7 @@ describe("server message handling", () => {
     const body = messageBody();
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(deps.waha.startTyping).toHaveBeenCalledWith("111@c.us");
+    expect(deps.waha.startTyping).toHaveBeenCalledWith("111@c.us", expect.any(AbortSignal));
   });
 
   it("does not send a typing indicator when the sender is rate limited", async () => {
@@ -440,7 +440,7 @@ describe("server message handling", () => {
     const body = messageBody({ body: "hi there" });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(deps.waha.startTyping).toHaveBeenCalledWith("111@c.us");
+    expect(deps.waha.startTyping).toHaveBeenCalledWith("111@c.us", expect.any(AbortSignal));
     expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "final reply" }]);
     expect(deps.waha.editMessage).not.toHaveBeenCalled();
   });

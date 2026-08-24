@@ -5,6 +5,24 @@ import type { WahaClientLike } from "./client.js";
 // WAHA doesn't document an exact expiry for the typing indicator, so it's
 // refreshed periodically while an exchange is still in progress.
 const TYPING_REFRESH_MS = 20_000;
+export const PRESENCE_REQUEST_TIMEOUT_MS = 10_000;
+
+function boundedPresenceRequest(
+  action: string,
+  request: (signal: AbortSignal) => Promise<void>,
+): Promise<void> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`${action} timed out`));
+    }, PRESENCE_REQUEST_TIMEOUT_MS);
+  });
+  return Promise.race([Promise.resolve().then(() => request(controller.signal)), timeout]).finally(() => {
+    clearTimeout(timer);
+  });
+}
 
 function logStartTypingFailure(err: unknown): void {
   log("startTyping failed", err instanceof Error ? err.message : String(err));
@@ -18,16 +36,13 @@ function logStartTypingFailure(err: unknown): void {
 // begin() gets a single clean bracketed send with nothing left running,
 // without having to remember to call end() itself.
 //
-// State is refcounted per chat, not just a boolean: `allowlist.ts`'s group
+// State is refcounted per chat, not just a boolean: allowlist.ts's group
 // handling lets multiple different senders concurrently trigger the bot in
-// the same group chat — SenderLock only serializes per *sender*, so two
-// overlapping exchanges can share one chatId. A boolean "active" set would
-// let the second exchange's begin() silently replace the first's interval
-// (leaking the old one), and whichever exchange finishes first would call
-// end() and kill typing out from under the other, still-running one. All
-// three mutating operations (begin/send/end) go through the same per-chat
-// lock so they can't race each other, and end() only truly ends the chat
-// once the last concurrent exchange for it has finished.
+// the same group chat. SenderLock only serializes per sender, so two
+// overlapping exchanges can share one chatId. All three mutating operations
+// (begin/send/end) go through the same per-chat lock so they cannot race each
+// other, and end() only truly ends the chat once the last concurrent exchange
+// has finished.
 export class TypingPresence {
   private readonly timers = new Map<string, ReturnType<typeof setInterval>>();
   private readonly activeCount = new Map<string, number>();
@@ -41,7 +56,9 @@ export class TypingPresence {
         const count = (this.activeCount.get(chatId) ?? 0) + 1;
         this.activeCount.set(chatId, count);
         if (count === 1) {
-          await this.waha.startTyping(chatId).catch(logStartTypingFailure);
+          await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal)).catch(
+            logStartTypingFailure,
+          );
           this.scheduleRefresh(chatId);
         }
       })
@@ -56,12 +73,16 @@ export class TypingPresence {
       // Presence cleanup is best-effort. A transient WAHA failure must never
       // suppress the actual reply, and the message id may already be marked
       // delivered by the caller's dedupe set.
-      await this.waha.stopTyping(chatId).catch((err: unknown) => {
-        log("stopTyping failed", err instanceof Error ? err.message : String(err));
-      });
+      await boundedPresenceRequest("stopTyping", (signal) => this.waha.stopTyping(chatId, signal)).catch(
+        (err: unknown) => {
+          log("stopTyping failed", err instanceof Error ? err.message : String(err));
+        },
+      );
       await this.waha.sendText(chatId, text);
       if ((this.activeCount.get(chatId) ?? 0) > 0) {
-        await Promise.resolve(this.waha.startTyping(chatId)).catch(logStartTypingFailure);
+        await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal)).catch(
+          logStartTypingFailure,
+        );
         this.scheduleRefresh(chatId);
       }
     });
@@ -76,11 +97,14 @@ export class TypingPresence {
       }
       this.activeCount.delete(chatId);
       this.pauseInterval(chatId);
-      await this.waha.stopTyping(chatId).catch((err: unknown) => {
-        log("stopTyping failed", err instanceof Error ? err.message : String(err));
-      });
+      await boundedPresenceRequest("stopTyping", (signal) => this.waha.stopTyping(chatId, signal)).catch(
+        (err: unknown) => {
+          log("stopTyping failed", err instanceof Error ? err.message : String(err));
+        },
+      );
     });
   }
+
   private pauseInterval(chatId: string): void {
     const timer = this.timers.get(chatId);
     if (timer) clearInterval(timer);
@@ -94,7 +118,7 @@ export class TypingPresence {
         void this.perChat
           .run(chatId, async () => {
             if ((this.activeCount.get(chatId) ?? 0) > 0) {
-              await this.waha.startTyping(chatId);
+              await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal));
             }
           })
           .catch((err: unknown) => {

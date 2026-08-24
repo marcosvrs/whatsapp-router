@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WahaClientLike } from "../../src/waha/client.js";
-import { TypingPresence } from "../../src/waha/typingKeepAlive.js";
+import { PRESENCE_REQUEST_TIMEOUT_MS, TypingPresence } from "../../src/waha/typingKeepAlive.js";
 
 function fakeWaha(): WahaClientLike {
   return {
@@ -33,8 +33,25 @@ describe("TypingPresence", () => {
     // concurrent second exchange sharing the chat can't race it), which
     // means its own startTyping call happens a tick later, not synchronously.
     await vi.advanceTimersByTimeAsync(0);
-    expect(waha.startTyping).toHaveBeenCalledWith("chat1");
+    expect(waha.startTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
   });
+  it("bounds a hung initial typing request before sending", async () => {
+    const waha = fakeWaha();
+    waha.startTyping = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<void>(() => undefined))
+      .mockResolvedValue(undefined);
+    const typing = new TypingPresence(waha);
+
+    typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
+    const sendPromise = typing.send("chat1", "hello");
+    await vi.advanceTimersByTimeAsync(PRESENCE_REQUEST_TIMEOUT_MS);
+    await expect(sendPromise).resolves.toBeUndefined();
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    await typing.end("chat1");
+  });
+
 
   it("refreshes typing periodically while active", async () => {
     const waha = fakeWaha();
@@ -85,7 +102,7 @@ describe("TypingPresence", () => {
 
     (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(waha.startTyping).toHaveBeenCalledWith("chat1");
+    expect(waha.startTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
   });
 
   it("a one-off send() with no prior begin() does not resume typing or leave an interval running", async () => {
@@ -93,7 +110,7 @@ describe("TypingPresence", () => {
     const typing = new TypingPresence(waha);
     await typing.send("chat1", "hello");
 
-    expect(waha.stopTyping).toHaveBeenCalledWith("chat1");
+    expect(waha.stopTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
     expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
     expect(waha.startTyping).not.toHaveBeenCalled();
 
@@ -176,7 +193,7 @@ describe("TypingPresence", () => {
     typing.begin("chat1");
     await typing.end("chat1");
 
-    expect(waha.stopTyping).toHaveBeenCalledWith("chat1");
+    expect(waha.stopTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
 
     (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
     await vi.advanceTimersByTimeAsync(60_000);
@@ -202,8 +219,8 @@ describe("TypingPresence", () => {
 
     (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(waha.startTyping).toHaveBeenCalledWith("chat1");
-    expect(waha.startTyping).not.toHaveBeenCalledWith("chat2");
+    expect(waha.startTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
+    expect(waha.startTyping).not.toHaveBeenCalledWith("chat2", expect.any(AbortSignal));
   });
 
   it("two concurrent exchanges sharing a chat (e.g. two senders in one group) don't leak an interval or end each other's typing early", async () => {
@@ -226,11 +243,11 @@ describe("TypingPresence", () => {
     (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(waha.stopTyping).not.toHaveBeenCalled();
-    expect(waha.startTyping).toHaveBeenCalledWith("chat1");
+    expect(waha.startTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
 
     // Exchange B finishes too — now it should actually stop.
     await typing.end("chat1");
-    expect(waha.stopTyping).toHaveBeenCalledWith("chat1");
+    expect(waha.stopTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
     (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(waha.startTyping).not.toHaveBeenCalled();

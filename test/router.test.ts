@@ -527,6 +527,7 @@ describe("routeMessage — agent context", () => {
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
       awaitIdle: () => done,
       acquirePrompt,
+      markPromptCompleted: vi.fn(),
       stop: vi.fn(),
     });
     const sendSpy = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text) =>
@@ -572,6 +573,7 @@ describe("routeMessage — agent context", () => {
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
       awaitIdle: () => done,
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
       stop: vi.fn(),
     });
     const sendSpy = vi.spyOn(deps.opencode, "send").mockImplementation((_sessionId, text) =>
@@ -607,11 +609,13 @@ describe("routeMessage — agent context", () => {
     const firstWatch = {
       awaitIdle: () => firstDone,
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
       stop: vi.fn(),
     };
     const secondWatch = {
       awaitIdle: () => new Promise<void>(() => undefined),
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
       stop: vi.fn(),
     };
     vi.spyOn(deps.opencode, "watchSession")
@@ -642,6 +646,7 @@ describe("routeMessage — agent context", () => {
     const watch = {
       awaitIdle: () => done,
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
       stop: vi.fn(),
     };
     vi.spyOn(deps.opencode, "watchSession").mockImplementation((_sessionId, callback) => {
@@ -682,6 +687,7 @@ describe("routeMessage — agent context", () => {
     const watch = {
       awaitIdle: () => new Promise<void>(() => undefined),
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
       stop: vi.fn(),
     };
     vi.spyOn(deps.opencode, "watchSession").mockImplementation(() => Promise.resolve(watch));
@@ -706,6 +712,7 @@ describe("routeMessage — agent context", () => {
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
       awaitIdle: () => done,
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
       stop,
     });
     const send = vi.spyOn(deps.opencode, "send").mockRejectedValue(new Error("connection reset"));
@@ -729,6 +736,7 @@ describe("routeMessage — agent context", () => {
     const watch = {
       awaitIdle: () => Promise.resolve(),
       acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
       stop: vi.fn(),
     };
     vi.spyOn(deps.opencode, "watchSession").mockImplementation((sessionId) => {

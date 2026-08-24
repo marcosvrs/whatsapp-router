@@ -99,6 +99,14 @@ function backgroundWorkState(text: string): boolean | undefined {
   if (BACKGROUND_TASK_PROGRESS_MARKERS.some((marker) => normalized.startsWith(marker))) return true;
   return undefined;
 }
+function mayBeBackgroundMarkerPrefix(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return true;
+  return [BACKGROUND_TASK_COMPLETE_MARKER, ...BACKGROUND_TASK_PROGRESS_MARKERS].some(
+    (marker) => marker.startsWith(normalized) || normalized.startsWith(marker),
+  );
+}
+
 
 // The current OpenCode server emits server.connected as the first SSE event.
 // The SDK creates the async stream lazily, so readiness is resolved from the
@@ -133,7 +141,10 @@ export interface OpencodeSessionWatch {
   awaitIdle: () => Promise<void>;
   // Holds the watcher open while a prompt's HTTP request is in flight.
   // Returns undefined when the watcher has already settled.
-  acquirePrompt: (chatId: string) => (() => void) | undefined;
+  acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
+  // Marks the prompt HTTP result as a completed assistant turn even if SSE
+  // missed its completion event.
+  markPromptCompleted: () => void;
   stop: () => void;
 }
 
@@ -243,8 +254,10 @@ export class OpencodeClient {
     const partsByMessage = new Map<string, Map<string, string>>();
     const pendingPrompts: { chatId: string; active: boolean }[] = [];
     const chatByMessage = new Map<string, string>();
-    let fallbackChatId: string | undefined;
-    let backgroundChatId: string | undefined;
+    const userMessageMetadata = new Map<string, { system?: string }>();
+    const processedUserMessages = new Set<string>();
+    const backgroundDestinations: { chatId: string; pending: boolean }[] = [];
+    let unassignedBackgroundPending = false;
     let quietTimer: ReturnType<typeof setTimeout>;
     let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
     let connectionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -319,6 +332,40 @@ export class OpencodeClient {
       connectionTimer = undefined;
       resolveConnection();
     };
+    const processUserMessageState = (messageId: string, text: string, system?: string): boolean => {
+      const isRouterPrompt = system?.startsWith("You are being reached over WhatsApp.") === true;
+      const state = isRouterPrompt ? undefined : backgroundWorkState(text);
+      if (state !== undefined) {
+        if (state) {
+          const normalized = text.trim();
+          const destination =
+            normalized.startsWith("[BACKGROUND TASK RETRY")
+              ? backgroundDestinations.find((item) => item.pending)
+              : backgroundDestinations.findLast((item) => !item.pending) ??
+                backgroundDestinations.find((item) => item.pending);
+          if (destination) {
+            destination.pending = true;
+            chatByMessage.set(messageId, destination.chatId);
+            unassignedBackgroundPending = false;
+          } else {
+            unassignedBackgroundPending = true;
+          }
+        } else {
+          const destination = backgroundDestinations.find((item) => item.pending);
+          if (destination) {
+            destination.pending = false;
+            chatByMessage.set(messageId, destination.chatId);
+            backgroundDestinations.splice(backgroundDestinations.indexOf(destination), 1);
+          } else {
+            unassignedBackgroundPending = false;
+          }
+        }
+        backgroundWorkPending = unassignedBackgroundPending || backgroundDestinations.some((item) => item.pending);
+      }
+      if (!text.trim()) return false;
+      return isRouterPrompt || state !== undefined || !mayBeBackgroundMarkerPrefix(text);
+    };
+
 
     // event.subscribe() returns a lazy async stream. The current server emits
     // server.connected as its first event, and the SDK callback fires only
@@ -366,6 +413,15 @@ export class OpencodeClient {
                   properties.partID,
                   `${byPart.get(properties.partID) ?? ""}${properties.delta}`,
                 );
+                const metadata = userMessageMetadata.get(properties.messageID);
+                if (metadata) {
+                  const text = joinTexts([...byPart.values()]);
+                  if (processUserMessageState(properties.messageID, text, metadata.system)) {
+                    processedUserMessages.add(properties.messageID);
+                    userMessageMetadata.delete(properties.messageID);
+                    partsByMessage.delete(properties.messageID);
+                  }
+                }
               } else {
                 sessionBusy = true;
               }
@@ -384,6 +440,15 @@ export class OpencodeClient {
                   partsByMessage.set(part.messageID, byPart);
                 }
                 if (part.type === "text") byPart.set(part.id, part.text);
+                const metadata = userMessageMetadata.get(part.messageID);
+                if (metadata) {
+                  const text = joinTexts([...byPart.values()]);
+                  if (processUserMessageState(part.messageID, text, metadata.system)) {
+                    processedUserMessages.add(part.messageID);
+                    userMessageMetadata.delete(part.messageID);
+                    partsByMessage.delete(part.messageID);
+                  }
+                }
                 break;
               }
               case "message.updated": {
@@ -392,33 +457,34 @@ export class OpencodeClient {
                 relevant = true;
                 const byPart = partsByMessage.get(info.id);
                 const text = byPart ? joinTexts([...byPart.values()]) : "";
-                partsByMessage.delete(info.id);
 
                 if (info.role === "user") {
-                  const pendingPrompt = pendingPrompts.shift();
-                  const promptChatId = pendingPrompt?.chatId;
-                  if (pendingPrompt) pendingPrompt.active = false;
-                  if (promptChatId) {
-                    chatByMessage.set(info.id, promptChatId);
-                    fallbackChatId = promptChatId;
+                  if (processedUserMessages.delete(info.id)) {
+                    break;
                   }
                   const isRouterPrompt = info.system?.startsWith("You are being reached over WhatsApp.") === true;
-                  const backgroundState = isRouterPrompt ? undefined : backgroundWorkState(text);
-                  if (backgroundState !== undefined) {
-                    const destinationChatId = backgroundChatId ?? fallbackChatId;
-                    if (destinationChatId) chatByMessage.set(info.id, destinationChatId);
-                    backgroundWorkPending = backgroundState;
-                    if (backgroundState) {
-                      backgroundChatId ??= destinationChatId;
-                    } else {
-                      backgroundChatId = undefined;
+                  userMessageMetadata.set(info.id, { system: info.system });
+                  if (isRouterPrompt) {
+                    const pendingPrompt = pendingPrompts.shift();
+                    const promptChatId = pendingPrompt?.chatId;
+                    if (pendingPrompt) pendingPrompt.active = false;
+                    if (promptChatId) {
+                      chatByMessage.set(info.id, promptChatId);
+                      backgroundDestinations.push({ chatId: promptChatId, pending: false });
                     }
                   }
+                  if (processUserMessageState(info.id, text, info.system)) {
+                    userMessageMetadata.delete(info.id);
+                    partsByMessage.delete(info.id);
+                  }
+                } else {
+                  partsByMessage.delete(info.id);
                 }
                 if (info.role === "assistant") {
                   const destinationChatId = info.parentID ? chatByMessage.get(info.parentID) : undefined;
                   if (destinationChatId) chatByMessage.set(info.id, destinationChatId);
                   if (info.finish) {
+                  if (info.finish !== "tool-calls") sessionBusy = false;
                     hasCompletedAssistantTurn = true;
                     const reply = info.error ? `Agent error: ${errorMessage(info.error)}` : text;
                     if (reply) {
@@ -471,7 +537,7 @@ export class OpencodeClient {
       clearTimeout(ceilingTimer);
       throw err;
     }
-    const acquirePrompt = (chatId: string): (() => void) | undefined => {
+    const acquirePrompt = (chatId: string): ((cancel?: boolean) => void) | undefined => {
       if (controller.signal.aborted) return undefined;
       const pendingPrompt = { chatId, active: true };
       pendingPrompts.push(pendingPrompt);
@@ -479,10 +545,10 @@ export class OpencodeClient {
       clearTimeout(idleCandidateTimer);
       resetQuietTimer();
       let released = false;
-      return () => {
+      return (cancel = false) => {
         if (released) return;
         released = true;
-        if (pendingPrompt.active) {
+        if (cancel && pendingPrompt.active) {
           const index = pendingPrompts.indexOf(pendingPrompt);
           if (index >= 0) pendingPrompts.splice(index, 1);
           pendingPrompt.active = false;
@@ -493,10 +559,18 @@ export class OpencodeClient {
         resetQuietTimer();
       };
     };
+    const markPromptCompleted = (): void => {
+      if (controller.signal.aborted) return;
+      hasCompletedAssistantTurn = true;
+      sessionBusy = false;
+      scheduleIdleSettle();
+      resetQuietTimer();
+    };
 
     return {
       awaitIdle: () => idlePromise,
       acquirePrompt,
+      markPromptCompleted,
       stop: () => {
         settle("");
       },

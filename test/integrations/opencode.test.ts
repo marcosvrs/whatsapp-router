@@ -563,6 +563,63 @@ describe("OpencodeClient.watchSession", () => {
     releaseGroup?.();
     watch.stop();
   });
+  it("keeps overlapping background destinations separate", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+
+    const releaseDirect = watch.acquirePrompt("direct");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_direct",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_direct", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(
+      textPartUpdated("marker_direct", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"),
+    );
+    releaseDirect?.();
+
+    const releaseGroup = watch.acquirePrompt("group");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_group",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_group", sessionID: "ses_1", role: "user" } },
+    });
+    source.push(textPartUpdated("marker_group", "part_2", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
+    source.push(textPartUpdated("assistant_direct", "part_3", "ses_1", "direct background"));
+    source.push(assistantFinished("assistant_direct", "ses_1", "stop", "marker_direct"));
+    source.push(textPartUpdated("assistant_group", "part_4", "ses_1", "group background"));
+    source.push(assistantFinished("assistant_group", "ses_1", "stop", "marker_group"));
+
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_direct", "direct background", "direct");
+      expect(onMessage).toHaveBeenCalledWith("assistant_group", "group background", "group");
+    });
+    releaseGroup?.();
+    watch.stop();
+  });
+
 
   it("ignores events for a different session id", async () => {
     const source = fakeEventSource();
@@ -624,6 +681,52 @@ describe("OpencodeClient.watchSession", () => {
     source.push({ type: "session.status", properties: { sessionID: "ses_1", status: { type: "busy" } } });
     await vi.advanceTimersByTimeAsync(IDLE_GRACE_MS + 1);
     expect(resolved).toBe(false);
+    stop();
+  });
+
+  it("clears the busy latch on a terminal assistant finish", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+    source.push({
+      type: "message.part.updated",
+      properties: {
+        part: { id: "tool_1", messageID: "msg_1", sessionID: "ses_1", type: "tool" },
+      },
+    });
+    source.push(textPartUpdated("msg_1", "part_1", "ses_1", "done"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
+    stop();
+  });
+
+  it("processes background markers when message.updated precedes its parts", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+    source.push({ type: "message.updated", properties: { info: { id: "user_1", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("user_1", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(false);
+
+    source.push({ type: "message.updated", properties: { info: { id: "user_2", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("user_2", "part_2", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
+    source.push(textPartUpdated("msg_2", "part_3", "ses_1", "final"));
+    source.push(assistantFinished("msg_2", "ses_1"));
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
     stop();
   });
 
@@ -729,6 +832,26 @@ describe("OpencodeClient.watchSession", () => {
     stop();
   });
 
+
+  it("settles after the prompt result when SSE misses completion", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, acquirePrompt, markPromptCompleted, stop } = await client().watchSession("ses_1", vi.fn());
+    const release = acquirePrompt("chat1");
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(false);
+
+    markPromptCompleted();
+    release?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(true);
+    stop();
+  });
 
   it("hits the hard ceiling even with continuous activity", async () => {
     const source = fakeEventSource();
