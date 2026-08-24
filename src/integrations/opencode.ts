@@ -33,6 +33,21 @@ export interface OpencodeSendOptions {
   // Called after a stale session is replaced and before the retry prompt is sent.
   onSessionReplaced?: (sessionId: string) => Promise<void>;
 }
+export class OpencodeSendError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message = `opencode message send failed: ${String(status)}`) {
+    super(message);
+    this.name = "OpencodeSendError";
+    this.status = status;
+  }
+}
+
+export interface OpencodeSendResult {
+  sessionId: string;
+  reply: string;
+  messageId: string;
+}
 
 // Every error variant has a `name`; only some also have a string `data.message`
 // (MessageOutputLengthError's `data` is an untyped bag) — narrow explicitly
@@ -170,7 +185,9 @@ export class OpencodeClient {
 
   async createSession(): Promise<string> {
     const { data, response } = await this.client.session.create({});
-    if (!data) throw new Error(`session create failed: ${String(response.status)}`);
+    if (!data) {
+      throw new OpencodeSendError(response.status, `session create failed: ${String(response.status)}`);
+    }
     return data.id;
   }
 
@@ -210,7 +227,7 @@ export class OpencodeClient {
     sessionId: string,
     text: string,
     options: OpencodeSendOptions = {},
-  ): Promise<{ sessionId: string; reply: string; messageId: string }> {
+  ): Promise<OpencodeSendResult> {
     let currentSessionId = sessionId;
     let result = await this.promptMessage(currentSessionId, text, options);
 
@@ -221,7 +238,7 @@ export class OpencodeClient {
     }
 
     if (!result.data) {
-      throw new Error(`opencode message send failed: ${String(result.response.status)}`);
+      throw new OpencodeSendError(result.response.status);
     }
 
     const { info, parts } = result.data;
@@ -396,6 +413,7 @@ export class OpencodeClient {
         for await (const event of stream) {
           if (controller.signal.aborted) break;
           markConnected();
+          clearTimeout(idleCandidateTimer);
           const rawEvent = event as unknown as Event | MessagePartDeltaEvent;
           let relevant = false;
 

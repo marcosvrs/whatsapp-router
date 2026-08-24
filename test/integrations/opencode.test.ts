@@ -563,6 +563,37 @@ describe("OpencodeClient.watchSession", () => {
     releaseGroup?.();
     watch.stop();
   });
+  it("removes a canceled prompt destination before the next prompt", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+    const canceled = watch.acquirePrompt("direct");
+    canceled?.(true);
+    const release = watch.acquirePrompt("group");
+
+    source.push(textPartUpdated("user_group", "part_1", "ses_1", "group"));
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_group",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("assistant_group", "part_2", "ses_1", "group reply"));
+    source.push(assistantFinished("assistant_group", "ses_1", "stop", "user_group"));
+
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_group", "group reply", "group");
+    });
+    release?.();
+    watch.stop();
+  });
+
   it("keeps overlapping background destinations separate", async () => {
     const source = fakeEventSource();
     connectSource(source);

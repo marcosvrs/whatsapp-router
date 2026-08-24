@@ -1,7 +1,9 @@
-import type {
-  OpencodeClient,
-  OpencodeMediaAttachment,
-  OpencodeSessionWatch,
+import {
+  OpencodeSendError,
+  type OpencodeClient,
+  type OpencodeMediaAttachment,
+  type OpencodeSendResult,
+  type OpencodeSessionWatch,
 } from "./integrations/opencode.js";
 import { log } from "./log.js";
 import { markdownToWhatsapp } from "./markdownToWhatsapp.js";
@@ -251,12 +253,17 @@ async function handleAgent(
           exchange = replacement.exchange;
           releasePrompt = replacement.release;
         };
-
-        const result = await deps.opencode.send(sessionId, text, {
-          media: extras.media,
-          system: extras.context ? formatSystemContext(extras.context) : undefined,
-          onSessionReplaced: replaceExchange,
-        });
+        let result: OpencodeSendResult;
+        try {
+          result = await deps.opencode.send(sessionId, text, {
+            media: extras.media,
+            system: extras.context ? formatSystemContext(extras.context) : undefined,
+            onSessionReplaced: replaceExchange,
+          });
+        } catch (err) {
+          if (err instanceof OpencodeSendError) releasePrompt(true);
+          throw err;
+        }
         if (result.sessionId !== exchange.sessionId) {
           await replaceExchange(result.sessionId);
         }
