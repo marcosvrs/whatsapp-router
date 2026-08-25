@@ -86,7 +86,7 @@ export interface ActiveAgentExchange {
   reusable?: boolean;
   readonly isLive?: boolean;
   readonly done: Promise<void>;
-  acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
+  acquirePrompt: (chatId: string) => ((cancel?: boolean, userMessageId?: string) => void) | undefined;
   awaitChatIdle?: (chatId: string) => Promise<void>;
   awaitTurn?: (messageId: string) => Promise<void>;
   markPromptCompleted: (chatId?: string) => void;
@@ -111,7 +111,7 @@ export class AgentExchangeManager {
   ): Promise<{
     exchange: ActiveAgentExchange;
     created: boolean;
-    release: (cancel?: boolean) => void;
+    release: (cancel?: boolean, userMessageId?: string) => void;
   }> {
     const current = this.active.get(senderKey);
     if (current?.sessionId === sessionId && current.reusable !== false) {
@@ -248,9 +248,11 @@ async function handleAgent(
   let waitForExchange: Promise<void> = Promise.resolve();
   let endTyping: () => Promise<void> = () => Promise.resolve();
   let promptSucceeded = false;
+  let promptUserMessageId: string | undefined;
   try {
     await deps.senderLock.run(senderKey, async () => {
-      let releasePrompt: (cancel?: boolean) => void = () => undefined;
+      let releasePrompt: (cancel?: boolean, userMessageId?: string) => void = () => undefined;
+      let promptReleased = false;
       try {
         let sessionId = deps.sessions.get(senderKey);
         if (!sessionId) {
@@ -270,6 +272,7 @@ async function handleAgent(
 
         const replaceExchange = async (nextSessionId: string): Promise<void> => {
           releasePrompt(true);
+          promptReleased = true;
           deps.exchanges.stop(senderKey, exchange);
           deps.sessions.set(senderKey, nextSessionId);
           const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
@@ -277,6 +280,7 @@ async function handleAgent(
           exchangeIsLive = replacement.exchange.isLive !== false;
           waitForExchange = replacement.exchange.awaitChatIdle?.(chatId) ?? replacement.exchange.done;
           releasePrompt = replacement.release;
+          promptReleased = false;
         };
         let result: OpencodeSendResult;
         try {
@@ -286,18 +290,25 @@ async function handleAgent(
             onSessionReplaced: replaceExchange,
           });
         } catch (err) {
-          if (err instanceof OpencodeSendError) releasePrompt(true);
+          if (err instanceof OpencodeSendError) {
+            releasePrompt(true);
+            promptReleased = true;
+            if (acquired.created) deps.exchanges.stop(senderKey, exchange);
+          }
           throw err;
         }
         if (result.sessionId !== exchange.sessionId) {
           await replaceExchange(result.sessionId);
         }
         promptSucceeded = true;
+        promptUserMessageId = result.userMessageId;
+        releasePrompt(false, promptUserMessageId);
+        promptReleased = true;
         exchange.markPromptCompleted(chatId);
         await exchange.awaitTurn?.(result.messageId);
         exchange.deliver(result.messageId, result.reply, chatId);
       } finally {
-        releasePrompt(promptSucceeded);
+        if (!promptReleased) releasePrompt(false, promptSucceeded ? promptUserMessageId : undefined);
       }
     });
 

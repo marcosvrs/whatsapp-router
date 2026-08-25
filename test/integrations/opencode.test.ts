@@ -310,7 +310,7 @@ describe("OpencodeClient.send", () => {
   it("returns the concatenated text parts of a successful reply", async () => {
     sessionPrompt.mockResolvedValue(
       ok({
-        info: {},
+        info: { id: "assistant_1", parentID: "user_1" },
         parts: [
           { type: "text", text: "hello" },
           { type: "step-finish" },
@@ -319,7 +319,7 @@ describe("OpencodeClient.send", () => {
       }),
     );
     const result = await client().send("ses_1", "hi");
-    expect(result).toEqual({ sessionId: "ses_1", reply: "hello\nworld" });
+    expect(result).toMatchObject({ sessionId: "ses_1", reply: "hello\nworld", userMessageId: "user_1" });
   });
 
   it("returns a placeholder when there are no text parts", async () => {
@@ -692,6 +692,38 @@ describe("OpencodeClient.watchSession", () => {
       expect(onMessage).toHaveBeenCalledWith("assistant_group", "group reply", "group");
     });
     releaseGroup?.();
+    watch.stop();
+  });
+  it("correlates delayed prompt events with their originating destinations", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+    const releaseDirect = watch.acquirePrompt("direct");
+    releaseDirect?.(false, "user_direct");
+    const releaseGroup = watch.acquirePrompt("group");
+    releaseGroup?.(false, "user_group");
+
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "user_group", sessionID: "ses_1", role: "user", system: "You are being reached over WhatsApp." } },
+    });
+    source.push(textPartUpdated("assistant_group", "part_group", "ses_1", "group reply"));
+    source.push(assistantFinished("assistant_group", "ses_1", "stop", "user_group"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_group", "group reply", "group");
+    });
+
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "user_direct", sessionID: "ses_1", role: "user", system: "You are being reached over WhatsApp." } },
+    });
+    source.push(textPartUpdated("assistant_direct", "part_direct", "ses_1", "direct reply"));
+    source.push(assistantFinished("assistant_direct", "ses_1", "stop", "user_direct"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_direct", "direct reply", "direct");
+    });
+
     watch.stop();
   });
   it("removes a canceled prompt destination before the next prompt", async () => {

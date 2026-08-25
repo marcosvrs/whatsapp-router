@@ -534,7 +534,7 @@ describe("routeMessage — agent context", () => {
     expect(lastSentText()).toBe("got your location");
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
-  it("retires a successful prompt before another chat can claim its destination", async () => {
+  it("correlates successful prompt destinations before another chat can claim them", async () => {
     deps.sessions.set("111", "ses_1");
     let release!: () => void;
     const done = new Promise<void>((resolve) => {
@@ -554,6 +554,7 @@ describe("routeMessage — agent context", () => {
         sessionId: "ses_1",
         reply: text,
         messageId: text,
+        userMessageId: `user_${text}`,
       }),
     );
 
@@ -574,8 +575,8 @@ describe("routeMessage — agent context", () => {
     ]);
     expect(acquirePrompt).toHaveBeenCalledTimes(2);
     expect(markPromptCompleted).toHaveBeenCalledTimes(2);
-    expect(releasePrompt).toHaveBeenNthCalledWith(1, true);
-    expect(releasePrompt).toHaveBeenNthCalledWith(2, true);
+    expect(releasePrompt).toHaveBeenNthCalledWith(1, false, "user_first");
+    expect(releasePrompt).toHaveBeenNthCalledWith(2, false, "user_second");
     expect(sendSpy).toHaveBeenNthCalledWith(
       1,
       "ses_1",
@@ -844,7 +845,7 @@ describe("routeMessage — agent context", () => {
       expect(send).toHaveBeenCalledTimes(1);
     });
     await route;
-    expect(releasePrompt).toHaveBeenCalledWith(false);
+    expect(releasePrompt).toHaveBeenCalledWith(false, undefined);
     expect(sendNotice).not.toHaveBeenCalledWith(CHAT_ID, "Agent call failed — check whatsapp-router logs.");
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "opencode call outcome ambiguous; live watcher retained",
@@ -1008,17 +1009,19 @@ describe("routeMessage — agent context", () => {
   it("cancels a pending destination for a known prompt rejection", async () => {
     deps.sessions.set("111", "ses_1");
     const releasePrompt = vi.fn();
+    const stop = vi.fn();
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
       awaitIdle: () => new Promise<void>(() => undefined),
       acquirePrompt: () => releasePrompt,
       markPromptCompleted: vi.fn(),
-      stop: vi.fn(),
+      stop,
     });
     vi.spyOn(deps.opencode, "send").mockRejectedValue(new OpencodeSendError(500));
 
     await routeMessage(deps, "111", CHAT_ID, "hi");
 
     expect(releasePrompt).toHaveBeenCalledWith(true);
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 
   it("replaces the watcher when a send result reports a new session", async () => {

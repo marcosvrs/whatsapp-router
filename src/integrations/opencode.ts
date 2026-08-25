@@ -47,6 +47,7 @@ export interface OpencodeSendResult {
   sessionId: string;
   reply: string;
   messageId: string;
+  userMessageId?: string;
 }
 
 // Every error variant has a `name`; only some also have a string `data.message`
@@ -172,7 +173,7 @@ export interface OpencodeSessionWatch {
   awaitTurn?: (messageId: string) => Promise<void>;
   // Holds the watcher open while a prompt's HTTP request is in flight.
   // Returns undefined when the watcher has already settled.
-  acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
+  acquirePrompt: (chatId: string) => ((cancel?: boolean, userMessageId?: string) => void) | undefined;
   // Marks the prompt HTTP result as a completed assistant turn even if SSE
   // missed its completion event.
   markPromptCompleted: (chatId?: string) => void;
@@ -261,11 +262,21 @@ export class OpencodeClient {
     if (info.error) {
       const errMsg = errorMessage(info.error);
       warn("opencode agent error", errMsg);
-      return { sessionId: currentSessionId, reply: `Agent error: ${errMsg}`, messageId: info.id };
+      return {
+        sessionId: currentSessionId,
+        reply: `Agent error: ${errMsg}`,
+        messageId: info.id,
+        userMessageId: info.parentID,
+      };
     }
 
     const reply = extractReplyText(parts);
-    return { sessionId: currentSessionId, reply: reply || "(no output)", messageId: info.id };
+    return {
+      sessionId: currentSessionId,
+      reply: reply || "(no output)",
+      messageId: info.id,
+      userMessageId: info.parentID,
+    };
   }
 
   // Watches a session for completed turns, delivering each one via onMessage
@@ -285,11 +296,11 @@ export class OpencodeClient {
     // messageId -> partId -> latest text. Full part updates replace the
     // current value; delta events append to the current value.
     const partsByMessage = new Map<string, Map<string, string>>();
-    const pendingPrompts: { chatId: string; active: boolean }[] = [];
+    const pendingPrompts: { chatId: string; active: boolean; userMessageId?: string }[] = [];
     const chatByMessage = new Map<string, string>();
     const userMessageMetadata = new Map<string, { system?: string }>();
     const processedUserMessages = new Set<string>();
-    const backgroundDestinations: { chatId: string; pending: boolean }[] = [];
+    const backgroundDestinations: { chatId: string; pending: boolean; userMessageId?: string }[] = [];
     const chatLifecycles = new Map<string, ChatLifecycle>();
     const seenAssistantMessages = new Set<string>();
     let assistantStreamActivity = false;
@@ -416,6 +427,12 @@ export class OpencodeClient {
       );
       if (lifecycle.backgroundPending) clearTimeout(lifecycle.idleTimer);
       else scheduleChatIdle(chatId);
+    };
+    const registerPromptDestination = (chatId: string, userMessageId: string): void => {
+      chatByMessage.set(userMessageId, chatId);
+      if (backgroundDestinations.some((destination) => destination.userMessageId === userMessageId)) return;
+      cancelChatIdle(chatId);
+      backgroundDestinations.push({ chatId, pending: false, userMessageId });
     };
     const awaitChatIdle = (chatId: string): Promise<void> => {
       if (controller.signal.aborted) return Promise.resolve();
@@ -636,14 +653,14 @@ export class OpencodeClient {
                   }
                   userMessageMetadata.set(info.id, { system: info.system });
                   if (isRouterPrompt) {
-                    const pendingPrompt = pendingPrompts.shift();
+                    const pendingPrompt =
+                      pendingPrompts.find((candidate) => candidate.userMessageId === info.id) ??
+                      pendingPrompts.find((candidate) => candidate.userMessageId === undefined);
+                    const promptIndex = pendingPrompt ? pendingPrompts.indexOf(pendingPrompt) : -1;
+                    if (promptIndex >= 0) pendingPrompts.splice(promptIndex, 1);
                     const promptChatId = pendingPrompt?.chatId;
                     if (pendingPrompt) pendingPrompt.active = false;
-                    if (promptChatId) {
-                      cancelChatIdle(promptChatId);
-                      chatByMessage.set(info.id, promptChatId);
-                      backgroundDestinations.push({ chatId: promptChatId, pending: false });
-                    }
+                    if (promptChatId) registerPromptDestination(promptChatId, info.id);
                   }
                   if (processUserMessageState(info.id, text, info.system)) {
                     rescheduleCompletedChatIdle();
@@ -738,10 +755,10 @@ export class OpencodeClient {
       clearTimeout(ceilingTimer);
       throw err;
     }
-    const acquirePrompt = (chatId: string): ((cancel?: boolean) => void) | undefined => {
+    const acquirePrompt = (chatId: string): ((cancel?: boolean, userMessageId?: string) => void) | undefined => {
       if (controller.signal.aborted) return undefined;
       promptLeaseAcquired = true;
-      const pendingPrompt = { chatId, active: true };
+      const pendingPrompt: { chatId: string; active: boolean; userMessageId?: string } = { chatId, active: true };
       const lifecycle = getChatLifecycle(chatId);
       assistantStreamActivity = false;
       lifecycle.activePrompts += 1;
@@ -751,7 +768,11 @@ export class OpencodeClient {
       clearIdleCandidate();
       resetQuietTimer();
       let released = false;
-      return (cancel = false) => {
+      return (cancel = false, userMessageId?: string) => {
+        if (userMessageId) {
+          pendingPrompt.userMessageId = userMessageId;
+          registerPromptDestination(chatId, userMessageId);
+        }
         if (released) return;
         released = true;
         if (cancel && pendingPrompt.active) {
