@@ -247,6 +247,7 @@ async function handleAgent(
   let exchangeIsLive: boolean | undefined;
   let waitForExchange: Promise<void> = Promise.resolve();
   let endTyping: () => Promise<void> = () => Promise.resolve();
+  let promptSucceeded = false;
   try {
     await deps.senderLock.run(senderKey, async () => {
       let releasePrompt: (cancel?: boolean) => void = () => undefined;
@@ -291,11 +292,12 @@ async function handleAgent(
         if (result.sessionId !== exchange.sessionId) {
           await replaceExchange(result.sessionId);
         }
+        promptSucceeded = true;
         exchange.markPromptCompleted(chatId);
         await exchange.awaitTurn?.(result.messageId);
         exchange.deliver(result.messageId, result.reply, chatId);
       } finally {
-        releasePrompt();
+        releasePrompt(promptSucceeded);
       }
     });
 

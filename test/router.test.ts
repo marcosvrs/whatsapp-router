@@ -534,7 +534,7 @@ describe("routeMessage — agent context", () => {
     expect(lastSentText()).toBe("got your location");
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
-  it("releases the sender lock after the prompt result while background watching continues", async () => {
+  it("retires a successful prompt before another chat can claim its destination", async () => {
     deps.sessions.set("111", "ses_1");
     let release!: () => void;
     const done = new Promise<void>((resolve) => {
@@ -557,20 +557,25 @@ describe("routeMessage — agent context", () => {
       }),
     );
 
-    const first = routeMessage(deps, "111", CHAT_ID, "first");
+    const first = routeMessage(deps, "111", "chat1", "first");
     await vi.waitFor(() => {
       expect(sendSpy).toHaveBeenCalledTimes(1);
     });
-    const second = routeMessage(deps, "111", CHAT_ID, "second");
+    const second = routeMessage(deps, "111", "chat2", "second");
     await vi.waitFor(() => {
       expect(sendSpy).toHaveBeenCalledTimes(2);
     });
 
     release();
     await Promise.all([first, second]);
+    expect(sentMessages).toEqual([
+      { chatId: "chat1", text: "first" },
+      { chatId: "chat2", text: "second" },
+    ]);
     expect(acquirePrompt).toHaveBeenCalledTimes(2);
     expect(markPromptCompleted).toHaveBeenCalledTimes(2);
-    expect(releasePrompt).toHaveBeenCalledTimes(2);
+    expect(releasePrompt).toHaveBeenNthCalledWith(1, true);
+    expect(releasePrompt).toHaveBeenNthCalledWith(2, true);
     expect(sendSpy).toHaveBeenNthCalledWith(
       1,
       "ses_1",
@@ -823,11 +828,12 @@ describe("routeMessage — agent context", () => {
     });
     const stop = vi.fn();
     const sendNotice = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    const releasePrompt = vi.fn();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
       isLive: true,
       awaitIdle: () => done,
-      acquirePrompt: () => () => undefined,
+      acquirePrompt: () => releasePrompt,
       markPromptCompleted: vi.fn(),
       stop,
     });
@@ -838,6 +844,7 @@ describe("routeMessage — agent context", () => {
       expect(send).toHaveBeenCalledTimes(1);
     });
     await route;
+    expect(releasePrompt).toHaveBeenCalledWith(false);
     expect(sendNotice).not.toHaveBeenCalledWith(CHAT_ID, "Agent call failed — check whatsapp-router logs.");
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "opencode call outcome ambiguous; live watcher retained",
