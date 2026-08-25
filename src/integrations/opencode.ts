@@ -166,6 +166,8 @@ export interface OpencodeSessionWatch {
   // `this` binding, and method shorthand makes eslint's unbound-method rule
   // flag them as unsafe to destructure even though they aren't.
   awaitIdle: () => Promise<void>;
+  // False means SSE setup failed and no live watcher retained the prompt.
+  isLive?: boolean;
   awaitChatIdle?: (chatId: string) => Promise<void>;
   awaitTurn?: (messageId: string) => Promise<void>;
   // Holds the watcher open while a prompt's HTTP request is in flight.
@@ -764,6 +766,7 @@ export class OpencodeClient {
     };
 
     return {
+      isLive: true,
       awaitIdle: () => idlePromise,
       awaitChatIdle,
       awaitTurn,

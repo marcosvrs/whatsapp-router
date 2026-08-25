@@ -559,7 +559,9 @@ describe("OpencodeClient.watchSession", () => {
     connectSource(source);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const onMessage = vi.fn();
-    const { awaitIdle, stop } = await client().watchSession("ses_1", onMessage);
+    const watch = await client().watchSession("ses_1", onMessage);
+    const { awaitIdle, stop } = watch;
+    expect(watch.isLive).toBe(true);
 
     source.push(textPartUpdated("msg_1", "prt_1", "ses_1", ""));
     source.push(textPartUpdated("msg_1", "prt_1", "ses_1", "hello world"));

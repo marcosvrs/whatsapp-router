@@ -83,6 +83,7 @@ export interface RouterDeps {
 // turn twice.
 export interface ActiveAgentExchange {
   readonly sessionId: string;
+  readonly isLive?: boolean;
   readonly done: Promise<void>;
   acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
   awaitChatIdle?: (chatId: string) => Promise<void>;
@@ -161,6 +162,7 @@ export class AgentExchangeManager {
     });
     const exchange: ActiveAgentExchange = {
       sessionId,
+      isLive: watch.isLive,
       done,
       acquirePrompt: (nextChatId) => watch.acquirePrompt(nextChatId),
       awaitChatIdle: watch.awaitChatIdle,
@@ -214,6 +216,7 @@ async function watchOrNoop(
   } catch (err) {
     error("watchSession connect failed — continuing without live streaming", err instanceof Error ? err.message : String(err));
     return {
+      isLive: false,
       awaitIdle: () => Promise.resolve(),
       acquirePrompt: () => () => undefined,
       markPromptCompleted: () => undefined,
@@ -239,6 +242,7 @@ async function handleAgent(
   }
 
   let exchange!: ActiveAgentExchange;
+  let exchangeIsLive: boolean | undefined;
   let waitForExchange: Promise<void> = Promise.resolve();
   let endTyping: () => Promise<void> = () => Promise.resolve();
   try {
@@ -255,6 +259,7 @@ async function handleAgent(
         endTyping = () => deps.typing.end(chatId);
         const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
         exchange = acquired.exchange;
+        exchangeIsLive = acquired.exchange.isLive !== false;
         waitForExchange =
           acquired.exchange.awaitChatIdle?.(chatId) ??
           (acquired.created ? acquired.exchange.done : Promise.resolve());
@@ -266,6 +271,7 @@ async function handleAgent(
           deps.sessions.set(senderKey, nextSessionId);
           const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
           exchange = replacement.exchange;
+          exchangeIsLive = replacement.exchange.isLive !== false;
           waitForExchange = replacement.exchange.awaitChatIdle?.(chatId) ?? replacement.exchange.done;
           releasePrompt = replacement.release;
         };
@@ -296,8 +302,13 @@ async function handleAgent(
     // be allowed to acquire the sender's prompt lock.
     await waitForExchange;
   } catch (err) {
-    error("opencode call failed", err instanceof Error ? err.message : String(err));
-    await deps.typing.send(chatId, "Agent call failed — check whatsapp-router logs.");
+    const isAmbiguous = !(err instanceof OpencodeSendError) && exchangeIsLive === true;
+    if (isAmbiguous) {
+      warn("opencode call outcome ambiguous; live watcher retained", err instanceof Error ? err.message : String(err));
+    } else {
+      error("opencode call failed", err instanceof Error ? err.message : String(err));
+      await deps.typing.send(chatId, "Agent call failed — check whatsapp-router logs.");
+    }
   } finally {
     await endTyping();
   }
