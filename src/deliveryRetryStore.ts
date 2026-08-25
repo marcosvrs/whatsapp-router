@@ -52,6 +52,10 @@ export class DeliveryRetryStore {
     this.save();
   }
 
+  clear(senderKey: string): void {
+    for (const entry of this.list(senderKey)) this.delete(senderKey, entry.messageId);
+  }
+
   private key(senderKey: string, messageId: string): string {
     return `${senderKey}:${messageId}`;
   }

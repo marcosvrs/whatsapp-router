@@ -708,9 +708,6 @@ export class OpencodeClient {
         }, TURN_RECONCILE_MS),
       );
     };
-    const resetTurnReconcile = (): void => {
-      for (const messageId of turnWaiters.keys()) scheduleTurnReconcile(messageId);
-    };
     const awaitTurn = (messageId: string): Promise<void> => {
       if (controller.signal.aborted || seenAssistantMessages.has(messageId) || !assistantStreamActivity) {
         return Promise.resolve();
@@ -944,7 +941,6 @@ export class OpencodeClient {
           }
           if (relevant) {
             resetQuietTimer();
-            resetTurnReconcile();
             resetCeilingTimer();
           }
         }

@@ -71,9 +71,17 @@ function lastSentText(): string | undefined {
 describe("routeMessage — /new", () => {
   it("resets the session and returns a confirmation when sent alone", async () => {
     deps.sessions.set("111", "ses_old");
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "stale",
+      text: "stale reply",
+      chatId: CHAT_ID,
+      attempts: 0,
+    });
     const reply = await routeMessage(deps, "111", CHAT_ID, "/new");
     expect(reply).toBe("Started a new conversation.");
     expect(deps.sessions.get("111")).toBeUndefined();
+    expect(deps.deliveryRetries.list("111")).toEqual([]);
   });
 
   it("resets the session and forwards remaining text to the agent", async () => {

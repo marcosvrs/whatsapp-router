@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(npm config get min-release-age)" = "3"
+          test "$(npm config get min-release-age)" = "4320"
           test "$(npm config get ignore-scripts)" = "true"
           test "$(npm config get allow-git)" = "none"
           test "$(npm config get allow-remote)" = "none"

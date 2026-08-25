@@ -400,6 +400,7 @@ export async function routeMessage(
     await deps.senderLock.run(senderKey, () => {
       deps.exchanges.bumpGeneration(senderKey);
       deps.exchanges.stop(senderKey);
+      deps.deliveryRetries.clear(senderKey);
       deps.sessions.reset(senderKey);
       return Promise.resolve();
     });
