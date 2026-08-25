@@ -535,6 +535,7 @@ export class OpencodeClient {
         return "";
       }
     };
+    const isActive = (): boolean => !controller.signal.aborted;
 
     // event.subscribe() returns a lazy async stream. The current server emits
     // server.connected as its first event, and the SDK callback fires only
@@ -663,9 +664,11 @@ export class OpencodeClient {
                     const reply = info.error
                       ? `Agent error: ${errorMessage(info.error)}`
                       : text || (await recoverMessageText(info.id));
-                    if (reply) {
-                      if (destinationChatId) onMessage(info.id, reply, destinationChatId);
-                      else onMessage(info.id, reply);
+                    if (isActive()) {
+                      if (reply) {
+                        if (destinationChatId) onMessage(info.id, reply, destinationChatId);
+                        else onMessage(info.id, reply);
+                      }
                     }
                     scheduleIdleSettle();
                   }

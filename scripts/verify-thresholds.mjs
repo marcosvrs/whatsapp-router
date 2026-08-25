@@ -113,6 +113,7 @@ function requiresFullVerification(file) {
     file === "package.json" ||
     file === "package-lock.json" ||
     file === ".npmrc" ||
+    file === "scripts/verify-thresholds.mjs" ||
     file === "vitest.config.ts" ||
     file === "stryker.config.mjs" ||
     file === "src/index.ts" ||

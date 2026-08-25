@@ -1751,6 +1751,28 @@ describe("OpencodeClient.watchSession", () => {
     stop();
   });
 
+  it("does not deliver recovered text after the watcher is stopped", async () => {
+    let resolveRecovery!: (value: ReturnType<typeof ok>) => void;
+    const recovery = new Promise<ReturnType<typeof ok>>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    sessionMessage.mockImplementation(() => recovery);
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+
+    source.push(assistantFinished("msg_1", "ses_1"));
+    await vi.waitFor(() => {
+      expect(sessionMessage).toHaveBeenCalled();
+    });
+
+    stop();
+    resolveRecovery(ok({ info: { id: "msg_1", sessionID: "ses_1", role: "assistant" }, parts: [{ type: "text", text: "stale" }] }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onMessage).not.toHaveBeenCalled();
+  });
   it("does not deliver when message recovery returns no data", async () => {
     sessionMessage.mockResolvedValue({ data: undefined, error: new Error("not found"), response: { status: 404 } });
     const source = fakeEventSource();

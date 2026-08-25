@@ -77,4 +77,34 @@ esac
     expect(result.status).toBe(0);
     expect(readFileSync(outputPath, "utf8")).toContain("run test:mutation");
   });
+  it("runs full verification when the verifier script changes", () => {
+    const binDir = join(dir, "bin");
+    mkdirSync(binDir);
+    const fakeGit = join(binDir, "git");
+    writeFileSync(
+      fakeGit,
+      `#!/bin/sh
+case " $* " in
+  *" --name-only "*) printf '%s\\n' 'scripts/verify-thresholds.mjs' ;;
+  *) : ;;
+esac
+`,
+    );
+    const fakeNpm = join(binDir, "npm");
+    writeFileSync(fakeNpm, '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$THRESHOLD_TEST_OUTPUT"\n');
+    chmodSync(fakeGit, 0o755);
+    chmodSync(fakeNpm, 0o755);
+    const outputPath = join(dir, "npm-args.txt");
+    const result = spawnSync(process.execPath, [scriptPath, "--mutation-only", "--staged"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        THRESHOLD_TEST_OUTPUT: outputPath,
+      },
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(outputPath, "utf8")).toContain("run test:mutation");
+  });
 });
