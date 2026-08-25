@@ -79,13 +79,16 @@ export class TypingPresence {
           warn("stopTyping failed", err instanceof Error ? err.message : String(err));
         },
       );
-      if (id) await this.waha.sendText(chatId, text, id);
-      else await this.waha.sendText(chatId, text);
-      if ((this.activeCount.get(chatId) ?? 0) > 0) {
-        await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal)).catch(
-          logStartTypingFailure,
-        );
-        this.scheduleRefresh(chatId);
+      try {
+        if (id) await this.waha.sendText(chatId, text, id);
+        else await this.waha.sendText(chatId, text);
+      } finally {
+        if ((this.activeCount.get(chatId) ?? 0) > 0) {
+          await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal)).catch(
+            logStartTypingFailure,
+          );
+          this.scheduleRefresh(chatId);
+        }
       }
     });
   }

@@ -221,6 +221,22 @@ describe("TypingPresence", () => {
     expect(startTyping).toHaveBeenCalledTimes(3);
   });
 
+  it("restores typing refresh after sendText fails while active", async () => {
+    const waha = fakeWaha();
+    const startTyping = waha.startTyping as ReturnType<typeof vi.fn>;
+    waha.sendText = vi.fn().mockRejectedValue(new Error("send failed"));
+    const typing = new TypingPresence(waha);
+
+    typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
+    startTyping.mockClear();
+
+    await expect(typing.send("chat1", "hello")).rejects.toThrow("send failed");
+    expect(startTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(startTyping).toHaveBeenCalledTimes(2);
+  });
+
 
   it("orders an in-flight refresh before stopTyping and sendText", async () => {
     const calls: string[] = [];
