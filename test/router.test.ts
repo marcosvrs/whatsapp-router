@@ -1036,6 +1036,29 @@ describe("routeMessage — agent context", () => {
     expect(watchedSessions).toEqual(["ses_stale", "ses_new"]);
     expect(deps.sessions.get("111")).toBe("ses_new");
   });
+  it("retries an initial delivery failure before finalizing deduplication", async () => {
+    const send = vi
+      .spyOn(deps.typing, "send")
+      .mockRejectedValueOnce(new Error("temporary WAHA failure"))
+      .mockResolvedValue(undefined);
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", CHAT_ID);
+
+    acquired.exchange.deliver("msg_3", "reply", CHAT_ID);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+    expect(send).toHaveBeenNthCalledWith(1, CHAT_ID, "reply", "msg_3");
+    expect(send).toHaveBeenNthCalledWith(2, CHAT_ID, "reply", "msg_3");
+    manager.stop("111", acquired.exchange);
+  });
   it("deduplicates a delivered message after the first send succeeds", async () => {
     const send = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
     const watch = {
