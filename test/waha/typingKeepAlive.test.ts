@@ -246,6 +246,13 @@ describe("TypingPresence", () => {
     await expect(typing.send("chat1", "hello")).resolves.toBeUndefined();
     expect(waha.sendTextWithSignal).toHaveBeenCalledWith("chat1", "hello", undefined, expect.any(AbortSignal));
   });
+  it("propagates a signal-aware WAHA send failure", async () => {
+    const waha = fakeWaha();
+    waha.sendTextWithSignal = vi.fn().mockRejectedValue(new Error("send failed"));
+    const typing = new TypingPresence(waha);
+
+    await expect(typing.send("chat1", "hello")).rejects.toThrow("send failed");
+  });
   it("bounds a hung sendText request while keeping typing state recoverable", async () => {
     const waha = fakeWaha();
     waha.sendText = vi.fn().mockImplementation(() => new Promise<void>(() => undefined));
