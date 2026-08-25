@@ -903,7 +903,7 @@ describe("routeMessage — agent context", () => {
     expect(sendNotice).toHaveBeenCalledWith(CHAT_ID, "Agent call failed — check whatsapp-router logs.");
   });
 
-  it("does not reuse an exchange blocked by an ambiguous prompt", async () => {
+  it("stops an exchange blocked by an ambiguous prompt before replacement", async () => {
     const makeWatch = () => ({
       isLive: true,
       awaitIdle: () => new Promise<void>(() => undefined),
@@ -925,7 +925,7 @@ describe("routeMessage — agent context", () => {
 
     expect(watchSession).toHaveBeenCalledTimes(2);
     expect(second.exchange).not.toBe(first.exchange);
-    expect(firstWatch.stop).not.toHaveBeenCalled();
+    expect(firstWatch.stop).toHaveBeenCalledTimes(1);
     first.exchange.stop();
     second.exchange.stop();
   });

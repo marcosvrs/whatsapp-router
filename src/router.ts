@@ -118,7 +118,7 @@ export class AgentExchangeManager {
       const release = current.acquirePrompt(chatId);
       if (release) return { exchange: current, created: false, release };
     }
-    if (current?.reusable !== false) current?.stop();
+    current?.stop();
 
     const delivered = new Set<string>();
     const inFlight = new Map<string, PendingDelivery>();
