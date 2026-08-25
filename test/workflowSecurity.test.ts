@@ -9,6 +9,11 @@ const socketWorkflow = readFileSync(
   new URL("../.github/workflows/socket-security.yml", import.meta.url),
   "utf8",
 );
+const npmrc = readFileSync(new URL("../.npmrc", import.meta.url), "utf8");
+const socketRequirements = readFileSync(
+  new URL("../.github/socket-security-requirements.txt", import.meta.url),
+  "utf8",
+);
 
 describe("pull request workflow runner security", () => {
   it.each(workflows)("routes $path pull requests to GitHub-hosted runners", ({ source }) => {
@@ -26,5 +31,13 @@ describe("secret-bearing Socket workflow security", () => {
     expect(socketWorkflow).not.toContain("issues: write");
     expect(socketWorkflow).not.toContain("pull-requests: write");
     expect(socketWorkflow).toContain("github.ref_name == 'main'");
+  });
+});
+describe("supply-chain dependency policy", () => {
+  it("uses a three-day npm quarantine and fully hashed Socket dependencies", () => {
+    expect(npmrc).toContain("min-release-age=4320");
+    expect(socketWorkflow).toContain("--require-hashes");
+    expect(socketWorkflow).toContain(".github/socket-security-requirements.txt");
+    expect(socketRequirements).toMatch(/^[a-z0-9_.-]+==[^ ]+ --hash=sha256:[0-9a-f]{64}$/m);
   });
 });

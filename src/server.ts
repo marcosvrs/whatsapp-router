@@ -94,6 +94,9 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
 
       info("inbound", from, JSON.stringify(text).slice(0, 200));
 
+      const preTypingChatId = from ?? "";
+      deps.router.typing.begin(preTypingChatId);
+      try {
       const media: OpencodeMediaAttachment[] = [];
       if (mediaAvailable && msg.media?.url) {
         const dataBase64 = await deps.waha.downloadMedia(msg.media.url);
@@ -151,8 +154,12 @@ export function buildServer(config: Config, deps: ServerDeps): Server {
       const reply = await routeMessage(deps.router, senderKey, from ?? "", text, {
         media: media.length ? media : undefined,
         context,
+        typingStarted: true,
       });
       if (reply) await deps.waha.sendText(from ?? "", reply);
+      } finally {
+        await deps.router.typing.end(preTypingChatId);
+      }
     } catch (err) {
       error("webhook handling error", err instanceof Error ? err.message : String(err));
     }

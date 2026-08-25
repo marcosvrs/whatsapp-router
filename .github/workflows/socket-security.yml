@@ -37,16 +37,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          socket_version="2.6.6"
-          socket_wheel_sha256="a3fb66b94b2c07fb26a0af867b25410c846aec90c5d50dfd55f246b7f115da76"
           wheel_dir="${RUNNER_TEMP}/socket-wheels"
           python -m pip download \
             --only-binary=:all: \
+            --require-hashes \
             --dest "$wheel_dir" \
-            "socketsecurity==${socket_version}"
-          socket_wheel="${wheel_dir}/socketsecurity-${socket_version}-py3-none-any.whl"
-          echo "${socket_wheel_sha256}  ${socket_wheel}" | sha256sum --check
-          python -m pip install --no-index --find-links "$wheel_dir" "socketsecurity==${socket_version}"
+            -r .github/socket-security-requirements.txt
+          python -m pip install \
+            --no-index \
+            --find-links "$wheel_dir" \
+            --require-hashes \
+            -r .github/socket-security-requirements.txt
           python -m pip check
 
       - name: Run Socket Security Scan

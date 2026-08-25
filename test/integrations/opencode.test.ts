@@ -1851,6 +1851,13 @@ describe("OpencodeClient.watchSession", () => {
     void wait.then(() => {
       resolved = true;
     });
+    await vi.advanceTimersByTimeAsync(TURN_RECONCILE_MS - 10);
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "streaming-2", sessionID: "ses_1", role: "assistant" } },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolved).toBe(false);
     await vi.advanceTimersByTimeAsync(TURN_RECONCILE_MS - 1);
     expect(resolved).toBe(false);
     await vi.advanceTimersByTimeAsync(1);

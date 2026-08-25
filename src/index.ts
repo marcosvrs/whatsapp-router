@@ -1,6 +1,7 @@
 import { loadConfig } from "./config.js";
 import { MessageDedupe } from "./dedupe.js";
 import { OpencodeClient } from "./integrations/opencode.js";
+import { DeliveryRetryStore } from "./deliveryRetryStore.js";
 import { info } from "./log.js";
 import { AgentExchangeManager } from "./router.js";
 import { RateLimiter } from "./rateLimit.js";
@@ -29,6 +30,7 @@ const deps: ServerDeps = {
       modelId: config.opencodeModelId,
     }),
     sessions: new SessionStore(config.sessionsFile),
+    deliveryRetries: new DeliveryRetryStore(`${config.sessionsFile}.delivery-retries.json`),
     senderLock: new SenderLock(),
     typing: new TypingPresence(waha),
     exchanges: new AgentExchangeManager(),

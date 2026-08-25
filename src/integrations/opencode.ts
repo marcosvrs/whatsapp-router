@@ -563,6 +563,7 @@ export class OpencodeClient {
     const seenAssistantMessages = new Set<string>();
     let assistantStreamActivity = false;
     const turnWaiters = new Map<string, Set<() => void>>();
+    const turnTimers = new Map<string, ReturnType<typeof setTimeout>>();
     let unassignedBackgroundPending = false;
     let quietTimer: ReturnType<typeof setTimeout>;
     let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -593,6 +594,8 @@ export class OpencodeClient {
         for (const resolve of lifecycle.waiters) resolve();
         lifecycle.waiters.clear();
       }
+      for (const timer of turnTimers.values()) clearTimeout(timer);
+      turnTimers.clear();
       for (const waiters of turnWaiters.values()) {
         for (const resolve of waiters) resolve();
       }
@@ -688,6 +691,26 @@ export class OpencodeClient {
         scheduleChatIdle(chatId);
       });
     };
+    const settleTurnWaiters = (messageId: string): void => {
+      clearTimeout(turnTimers.get(messageId));
+      turnTimers.delete(messageId);
+      const waiters = turnWaiters.get(messageId);
+      if (!waiters) return;
+      turnWaiters.delete(messageId);
+      for (const resolve of waiters) resolve();
+    };
+    const scheduleTurnReconcile = (messageId: string): void => {
+      clearTimeout(turnTimers.get(messageId));
+      turnTimers.set(
+        messageId,
+        setTimeout(() => {
+          settleTurnWaiters(messageId);
+        }, TURN_RECONCILE_MS),
+      );
+    };
+    const resetTurnReconcile = (): void => {
+      for (const messageId of turnWaiters.keys()) scheduleTurnReconcile(messageId);
+    };
     const awaitTurn = (messageId: string): Promise<void> => {
       if (controller.signal.aborted || seenAssistantMessages.has(messageId) || !assistantStreamActivity) {
         return Promise.resolve();
@@ -696,19 +719,12 @@ export class OpencodeClient {
         const waiters = turnWaiters.get(messageId) ?? new Set<() => void>();
         waiters.add(resolve);
         turnWaiters.set(messageId, waiters);
-        setTimeout(() => {
-          waiters.delete(resolve);
-          if (waiters.size === 0) turnWaiters.delete(messageId);
-          resolve();
-        }, TURN_RECONCILE_MS);
+        scheduleTurnReconcile(messageId);
       });
     };
     const markAssistantSeen = (messageId: string): void => {
       seenAssistantMessages.add(messageId);
-      const waiters = turnWaiters.get(messageId);
-      if (!waiters) return;
-      turnWaiters.delete(messageId);
-      for (const resolve of waiters) resolve();
+      settleTurnWaiters(messageId);
     };
     const hasTrackedWork = (): boolean =>
       sessionBusy || backgroundWorkPending || promptLeases > 0 || idleCandidateTimer !== undefined;
@@ -892,7 +908,7 @@ export class OpencodeClient {
                   if (destinationChatId) chatByMessage.set(info.id, destinationChatId);
                   if (info.finish) {
                     markAssistantSeen(info.id);
-                  if (info.finish !== "tool-calls") sessionBusy = false;
+                  sessionBusy = false;
                     hasCompletedAssistantTurn = true;
                     const recoveredText = info.error ? "" : await recoverMessageText(info.id);
                     const reply = info.error
@@ -928,6 +944,7 @@ export class OpencodeClient {
           }
           if (relevant) {
             resetQuietTimer();
+            resetTurnReconcile();
             resetCeilingTimer();
           }
         }

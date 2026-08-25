@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpencodeClient, OpencodeSendError, type OpencodeMediaAttachment } from "../src/integrations/opencode.js";
+import { DeliveryRetryStore } from "../src/deliveryRetryStore.js";
 import { AgentExchangeManager, routeMessage, type RouterDeps } from "../src/router.js";
 import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
@@ -54,6 +55,7 @@ beforeEach(() => {
     senderLock: new SenderLock(),
     typing: new TypingPresence(waha),
     exchanges: new AgentExchangeManager(),
+    deliveryRetries: new DeliveryRetryStore(join(dir, "delivery-retries.json")),
   };
 });
 
@@ -630,6 +632,30 @@ describe("routeMessage — agent context", () => {
     expect(firstDone).toBe(false);
     release();
     await first;
+  });
+
+  it("replays a persisted delivery after exchange recovery", async () => {
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "persisted-message",
+      text: "recovered reply",
+      chatId: "chat-recovered",
+      attempts: 1,
+    });
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    });
+
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+    await vi.waitFor(() => {
+      expect(sentMessages).toEqual([{ chatId: "chat-recovered", text: "recovered reply" }]);
+    });
+    expect(deps.deliveryRetries.list("111")).toEqual([]);
+    acquired.exchange.stop();
   });
 
   it("does not let an old finalizer delete a same-session replacement", async () => {

@@ -8,6 +8,7 @@ import {
 import { debug, error, warn } from "./log.js";
 import { markdownToWhatsapp } from "./markdownToWhatsapp.js";
 import type { SenderLock } from "./senderLock.js";
+import type { DeliveryRetryStore } from "./deliveryRetryStore.js";
 import type { SessionStore } from "./sessionStore.js";
 import type { TypingPresence } from "./waha/typingKeepAlive.js";
 
@@ -30,6 +31,7 @@ export interface AgentContext {
 export interface RouteExtras {
   media?: OpencodeMediaAttachment[];
   context?: AgentContext;
+  typingStarted?: boolean;
 }
 
 function hasMedia(extras: RouteExtras): boolean {
@@ -74,6 +76,7 @@ export interface RouterDeps {
   senderLock: SenderLock;
   typing: TypingPresence;
   exchanges: AgentExchangeManager;
+  deliveryRetries: DeliveryRetryStore;
 }
 
 // Keeps one SSE watch per sender/session while allowing the sender lock to be
@@ -137,15 +140,24 @@ export class AgentExchangeManager {
       const pending = inFlight.get(messageId);
       if (pending) {
         pending.fallback = { text, chatId: destinationChatId, attempts: pending.attempts };
+        deps.deliveryRetries.set({
+          senderKey,
+          messageId,
+          text,
+          chatId: destinationChatId,
+          attempts: pending.attempts,
+        });
         return;
       }
       const delivery: PendingDelivery = { text, chatId: destinationChatId, attempts };
+      deps.deliveryRetries.set({ senderKey, messageId, text, chatId: destinationChatId, attempts });
       debug("agent turn delivery queued", messageId, destinationChatId);
       inFlight.set(messageId, delivery);
       void deliver(deps, destinationChatId, text, messageId)
         .then(() => {
           inFlight.delete(messageId);
           delivered.add(messageId);
+          deps.deliveryRetries.delete(senderKey, messageId);
           debug("agent turn delivered", messageId, destinationChatId);
         })
         .catch((err: unknown) => {
@@ -156,6 +168,7 @@ export class AgentExchangeManager {
             warn("retrying agent turn delivery", messageId);
             enqueueDelivery(messageId, fallback.text, fallback.chatId, delivery.attempts + 1);
           } else {
+            deps.deliveryRetries.delete(senderKey, messageId);
             error("agent turn delivery retries exhausted", messageId);
           }
         });
@@ -194,6 +207,9 @@ export class AgentExchangeManager {
     };
     exchangeRef.current = exchange;
     this.active.set(senderKey, exchange);
+    for (const retry of deps.deliveryRetries.list(senderKey)) {
+      enqueueDelivery(retry.messageId, retry.text, retry.chatId, retry.attempts);
+    }
     const release = exchange.acquirePrompt(chatId) ?? (() => undefined);
     return { exchange, created: true, release };
   }
@@ -283,8 +299,10 @@ async function handleAgent(
           deps.sessions.set(senderKey, sessionId);
         }
 
-        deps.typing.begin(chatId);
-        endTyping = () => deps.typing.end(chatId);
+        if (!extras.typingStarted) {
+          deps.typing.begin(chatId);
+          endTyping = () => deps.typing.end(chatId);
+        }
         const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
         exchange = acquired.exchange;
         exchangeIsLive = acquired.exchange.isLive !== false;

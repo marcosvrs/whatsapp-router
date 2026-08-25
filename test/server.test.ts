@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Config } from "../src/config.js";
 import { MessageDedupe } from "../src/dedupe.js";
 import { OpencodeClient } from "../src/integrations/opencode.js";
+import { DeliveryRetryStore } from "../src/deliveryRetryStore.js";
 import { AgentExchangeManager } from "../src/router.js";
 import { RateLimiter } from "../src/rateLimit.js";
 import { SenderLock } from "../src/senderLock.js";
@@ -106,6 +107,7 @@ beforeEach(async () => {
     router: {
       opencode: new OpencodeClient({ baseUrl: config.opencodeBaseUrl, authHeader: "Basic abc", modelProvider: "", modelId: "" }),
       sessions: new SessionStore(config.sessionsFile),
+      deliveryRetries: new DeliveryRetryStore(join(dir, "delivery-retries.json")),
       senderLock: new SenderLock(),
       typing: new TypingPresence(waha),
       exchanges: new AgentExchangeManager(),
