@@ -829,6 +829,7 @@ describe("routeMessage — agent context", () => {
     });
     const stop = vi.fn();
     const sendNotice = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    const endTyping = vi.spyOn(deps.typing, "end");
     const releasePrompt = vi.fn();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(deps.opencode, "watchSession").mockResolvedValue({
@@ -840,24 +841,30 @@ describe("routeMessage — agent context", () => {
     });
     const send = vi.spyOn(deps.opencode, "send").mockRejectedValue(new Error("connection reset"));
 
-    const route = routeMessage(deps, "111", CHAT_ID, "hi");
+    let routeDone = false;
+    const route = routeMessage(deps, "111", CHAT_ID, "hi").then(() => {
+      routeDone = true;
+    });
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(1);
     });
-    await route;
+    expect(routeDone).toBe(false);
     expect(releasePrompt).toHaveBeenCalledWith(false, undefined);
     expect(sendNotice).not.toHaveBeenCalledWith(CHAT_ID, "Agent call failed — check whatsapp-router logs.");
+    expect(endTyping).not.toHaveBeenCalled();
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "opencode call outcome ambiguous; live watcher retained",
       "connection reset",
     ]);
     expect(stop).not.toHaveBeenCalled();
     releaseDone();
+    await route;
+    expect(endTyping).toHaveBeenCalledWith(CHAT_ID);
     await vi.waitFor(() => {
       expect(stop).toHaveBeenCalledTimes(1);
     });
-  });
 
+  });
   it("defers ambiguous failure after a live session replacement", async () => {
     deps.sessions.set("111", "ses_1");
     const makeWatch = (isLive: boolean) => ({

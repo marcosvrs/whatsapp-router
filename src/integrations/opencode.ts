@@ -235,6 +235,7 @@ class GlobalEventHub {
   private runPromise: Promise<void> | undefined;
   private connectionTimer: ReturnType<typeof setTimeout> | undefined;
   private connected = false;
+  private hasConnectedOnce = false;
 
   constructor(private readonly client: SdkClient) {}
 
@@ -245,6 +246,7 @@ class GlobalEventHub {
       const controller = new AbortController();
       this.controller = controller;
       this.connected = false;
+      this.hasConnectedOnce = false;
       this.connectionTimer = setTimeout(() => {
         this.failInitial(new Error("SSE connection timed out"));
       }, SSE_CONNECT_TIMEOUT_MS);
@@ -256,6 +258,7 @@ class GlobalEventHub {
         this.runPromise = undefined;
         this.controller = undefined;
         this.connected = false;
+        this.hasConnectedOnce = false;
       });
     }
 
@@ -277,6 +280,7 @@ class GlobalEventHub {
   private markConnected(): void {
     if (this.connected) return;
     this.connected = true;
+    this.hasConnectedOnce = true;
     clearTimeout(this.connectionTimer);
     this.connectionTimer = undefined;
     for (const waiter of this.connectionWaiters) waiter.resolve();
@@ -306,6 +310,15 @@ class GlobalEventHub {
       .map((listener) => listener.reconnectDelay())
       .filter((delay): delay is number => delay !== undefined);
     return delays.length > 0 ? Math.min(...delays) : undefined;
+  }
+  private async waitForReconnectable(controller: AbortController): Promise<number> {
+    let delay = this.nextReconnectDelay();
+    while (delay === undefined && !controller.signal.aborted && this.listeners.size > 0) {
+      this.pushStreamEnded();
+      await this.waitBeforeReconnect(controller, 1_000);
+      delay = this.nextReconnectDelay();
+    }
+    return delay ?? 1_000;
   }
 
   private waitBeforeReconnect(controller: AbortController, delay: number): Promise<void> {
@@ -342,7 +355,7 @@ class GlobalEventHub {
         } catch (err) {
           /* c8 ignore next -- abort can race an in-flight SDK subscription. */
           if (isAborted()) break;
-          if (!this.connected) {
+          if (!this.hasConnectedOnce) {
             this.failInitial(err);
             return;
           }
@@ -363,10 +376,11 @@ class GlobalEventHub {
           }
         }
         if (isAborted() || this.listeners.size === 0) break;
-        if (!this.connected) {
+        if (!this.hasConnectedOnce) {
           this.failInitial(new Error("SSE stream ended before connection"));
           return;
         }
+        this.connected = false;
         this.pushStreamEnded();
         if (sawSseError()) {
           error(
@@ -376,25 +390,21 @@ class GlobalEventHub {
         }
         hadSseError = false;
         await Promise.resolve();
-        let delay = this.nextReconnectDelay();
-        if (delay === undefined) {
-          this.pushStreamEnded();
-          await Promise.resolve();
-          delay = this.nextReconnectDelay();
-        }
-        if (delay === undefined) continue;
+        let delay = await this.waitForReconnectable(controller);
+        if (isAborted() || this.listeners.size === 0) break;
         await this.waitBeforeReconnect(controller, delay);
         if (isAborted() || this.listeners.size === 0) break;
         if (this.nextReconnectDelay() === undefined) {
-          this.pushStreamEnded();
-          await Promise.resolve();
-          if (this.listeners.size === 0) break;
+          delay = await this.waitForReconnectable(controller);
+          if (isAborted() || this.listeners.size === 0) break;
+        /* c8 ignore next -- a watcher can join while an inactive hub waits. */
+        await this.waitBeforeReconnect(controller, delay);
         }
-      }
   }
 }
 
 
+}
 export interface OpencodeSessionWatch {
   // Resolves once the session has gone quiet (or the hard ceiling is hit).
   // Only governs how long to keep watching/typing — delivery already
@@ -536,7 +546,7 @@ export class OpencodeClient {
     const partsByMessage = new Map<string, Map<string, string>>();
     const pendingPrompts: { chatId: string; active: boolean; userMessageId?: string }[] = [];
     const chatByMessage = new Map<string, string>();
-    const userMessageMetadata = new Map<string, { system?: string }>();
+    const userMessageMetadata = new Map<string, { system?: string; parentMessageId?: string }>();
     const processedUserMessages = new Set<string>();
     const backgroundDestinations: { chatId: string; pending: boolean; userMessageId?: string }[] = [];
     const chatLifecycles = new Map<string, ChatLifecycle>();
@@ -693,17 +703,27 @@ export class OpencodeClient {
     const hasTrackedWork = (): boolean =>
       sessionBusy || backgroundWorkPending || promptLeases > 0 || idleCandidateTimer !== undefined;
     resetQuietTimer();
-    const processUserMessageState = (messageId: string, text: string, system?: string): boolean => {
+    const processUserMessageState = (
+      messageId: string,
+      text: string,
+      system?: string,
+      parentMessageId?: string,
+    ): boolean => {
       const isRouterPrompt = system?.startsWith("You are being reached over WhatsApp.") === true;
       const state = isRouterPrompt ? undefined : backgroundWorkState(text);
+      const linkedChatId = parentMessageId ? chatByMessage.get(parentMessageId) : undefined;
+      const linkedDestination = linkedChatId
+        ? backgroundDestinations.findLast((item) => item.chatId === linkedChatId)
+        : undefined;
       if (state !== undefined) {
         if (state) {
           const normalized = text.trim();
           const destination =
-            normalized.startsWith("[BACKGROUND TASK RETRY")
-              ? backgroundDestinations.find((item) => item.pending)
-              : backgroundDestinations.findLast((item) => !item.pending) ??
-                backgroundDestinations.find((item) => item.pending);
+            linkedDestination ??
+            (normalized.startsWith("[BACKGROUND TASK RETRY")
+              ? backgroundDestinations.findLast((item) => item.pending)
+              : backgroundDestinations.find((item) => !item.pending) ??
+                backgroundDestinations.findLast((item) => item.pending));
           if (destination) {
             destination.pending = true;
             chatByMessage.set(messageId, destination.chatId);
@@ -713,7 +733,7 @@ export class OpencodeClient {
             unassignedBackgroundPending = true;
           }
         } else {
-          const destination = backgroundDestinations.find((item) => item.pending);
+          const destination = linkedDestination ?? backgroundDestinations.find((item) => item.pending);
           if (destination) {
             destination.pending = false;
             chatByMessage.set(messageId, destination.chatId);
@@ -776,7 +796,7 @@ export class OpencodeClient {
                 const metadata = userMessageMetadata.get(properties.messageID);
                 if (metadata) {
                   const text = joinTexts([...byPart.values()]);
-                  if (processUserMessageState(properties.messageID, text, metadata.system)) {
+                  if (processUserMessageState(properties.messageID, text, metadata.system, metadata.parentMessageId)) {
                     rescheduleCompletedChatIdle();
                     processedUserMessages.add(properties.messageID);
                     userMessageMetadata.delete(properties.messageID);
@@ -805,7 +825,7 @@ export class OpencodeClient {
                 const metadata = userMessageMetadata.get(part.messageID);
                 if (metadata) {
                   const text = joinTexts([...byPart.values()]);
-                  if (processUserMessageState(part.messageID, text, metadata.system)) {
+                  if (processUserMessageState(part.messageID, text, metadata.system, metadata.parentMessageId)) {
                     rescheduleCompletedChatIdle();
                     processedUserMessages.add(part.messageID);
                     userMessageMetadata.delete(part.messageID);
@@ -830,7 +850,9 @@ export class OpencodeClient {
                   for (const destination of backgroundDestinations) {
                     cancelChatIdle(destination.chatId);
                   }
-                  userMessageMetadata.set(info.id, { system: info.system });
+                  const parentMessageId =
+                    "parentID" in info && typeof info.parentID === "string" ? info.parentID : undefined;
+                  userMessageMetadata.set(info.id, { system: info.system, parentMessageId });
                   if (isRouterPrompt) {
                     const pendingPrompt =
                       pendingPrompts.find((candidate) => candidate.userMessageId === info.id) ??
@@ -841,7 +863,7 @@ export class OpencodeClient {
                     if (pendingPrompt) pendingPrompt.active = false;
                     if (promptChatId) registerPromptDestination(promptChatId, info.id);
                   }
-                  if (processUserMessageState(info.id, text, info.system)) {
+                  if (processUserMessageState(info.id, text, info.system, parentMessageId)) {
                     rescheduleCompletedChatIdle();
                     userMessageMetadata.delete(info.id);
                     partsByMessage.delete(info.id);

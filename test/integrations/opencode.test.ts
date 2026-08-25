@@ -885,6 +885,76 @@ describe("OpencodeClient.watchSession", () => {
     releaseGroup?.();
     watch.stop();
   });
+  it("routes a completion marker to the latest pending background task", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+    const releaseFirst = watch.acquirePrompt("chat1");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_1",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const releaseSecond = watch.acquirePrompt("chat2");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_2",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const releaseThird = watch.acquirePrompt("chat3");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_3",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    source.push({ type: "message.updated", properties: { info: { id: "marker_1", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("marker_1", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] first"));
+    await vi.advanceTimersByTimeAsync(0);
+    source.push({ type: "message.updated", properties: { info: { id: "marker_2", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("marker_2", "part_2", "ses_1", "[BACKGROUND TASK RESULT READY] second"));
+    await vi.advanceTimersByTimeAsync(0);
+    source.push({ type: "message.updated", properties: { info: { id: "marker_3", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("marker_3", "part_3", "ses_1", "[BACKGROUND TASK RESULT READY] third"));
+    await vi.advanceTimersByTimeAsync(0);
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "complete_2", sessionID: "ses_1", role: "user", parentID: "marker_2" } },
+    });
+    source.push(textPartUpdated("complete_2", "part_3", "ses_1", "[ALL BACKGROUND TASKS COMPLETE] second"));
+    await vi.advanceTimersByTimeAsync(0);
+    source.push(textPartUpdated("assistant_2", "part_4", "ses_1", "second result"));
+    source.push(assistantFinished("assistant_2", "ses_1", "stop", "complete_2"));
+
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_2", "second result", "chat2");
+    });
+    releaseFirst?.();
+    releaseSecond?.();
+    releaseThird?.();
+    watch.stop();
+  });
 
 
   it("settles after a malformed SSE event", async () => {
@@ -999,6 +1069,60 @@ describe("OpencodeClient.watchSession", () => {
       expect(onMessage).toHaveBeenCalledWith("assistant_chat1", "detached result", "chat1");
     });
     watch.stop();
+  });
+  it("waits for the shared subscription to reconnect before returning a new watcher", async () => {
+    const first = fakeEventSource();
+    const second = fakeEventSource();
+    eventSubscribe
+      .mockImplementationOnce(() => {
+        first.push({ type: "server.connected", properties: {} });
+        return { stream: first.stream };
+      })
+      .mockImplementationOnce(() => {
+        second.push({ type: "server.connected", properties: {} });
+        return { stream: second.stream };
+      });
+    const opencode = client();
+    const firstWatch = await opencode.watchSession("ses_1", vi.fn());
+    const release = firstWatch.acquirePrompt("chat1");
+
+    first.end();
+    await vi.advanceTimersByTimeAsync(0);
+    let resolved = false;
+    const secondPromise = opencode.watchSession("ses_2", vi.fn()).then((watch) => {
+      resolved = true;
+      return watch;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolved).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const secondWatch = await secondPromise;
+    expect(resolved).toBe(true);
+
+    release?.();
+    firstWatch.stop();
+    secondWatch.stop();
+  });
+  it("does not spin while recovery blocks an inactive listener", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    let resolveRecovery!: (value: ReturnType<typeof ok>) => void;
+    const recovery = new Promise<ReturnType<typeof ok>>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    sessionMessage.mockImplementation(() => recovery);
+    const watch = await client().watchSession("ses_1", vi.fn());
+
+    source.push(assistantFinished("msg_1", "ses_1"));
+    await vi.waitFor(() => {
+      expect(sessionMessage).toHaveBeenCalled();
+    });
+    source.end();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(eventSubscribe).toHaveBeenCalledTimes(1);
+
+    watch.stop();
+    resolveRecovery(ok({ info: { id: "msg_1", sessionID: "ses_1", role: "assistant" }, parts: [] }));
   });
 
   it("retries a reconnect failure while tracked work remains", async () => {

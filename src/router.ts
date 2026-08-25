@@ -321,6 +321,7 @@ async function handleAgent(
     if (isAmbiguous) {
       exchange.reusable = false;
       warn("opencode call outcome ambiguous; live watcher retained", err instanceof Error ? err.message : String(err));
+      await waitForExchange;
     } else {
       error("opencode call failed", err instanceof Error ? err.message : String(err));
       await deps.typing.send(chatId, "Agent call failed — check whatsapp-router logs.");
