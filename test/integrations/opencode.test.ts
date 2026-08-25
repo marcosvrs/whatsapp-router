@@ -14,6 +14,7 @@ vi.mock("@opencode-ai/sdk", () => ({ createOpencodeClient }));
 const {
   OpencodeClient,
   createEventQueue,
+  GlobalEventHub,
   eventSessionId,
   OpencodeSendError,
   IDLE_GRACE_MS,
@@ -321,7 +322,12 @@ describe("OpencodeClient.send", () => {
       }),
     );
     const result = await client().send("ses_1", "hi");
-    expect(result).toMatchObject({ sessionId: "ses_1", reply: "hello\nworld", userMessageId: "user_1" });
+    expect(result).toMatchObject({
+      sessionId: "ses_1",
+      reply: "hello\nworld",
+      userMessageId: "user_1",
+      mayHaveBackgroundWork: true,
+    });
   });
 
   it("returns a placeholder when there are no text parts", async () => {
@@ -402,7 +408,7 @@ describe("OpencodeClient.send", () => {
 
     const result = await client().send("ses_stale", "hi");
 
-    expect(result).toEqual({ sessionId: "ses_new", reply: "ok" });
+    expect(result).toMatchObject({ sessionId: "ses_new", reply: "ok", mayHaveBackgroundWork: false });
     expect(sessionCreate).toHaveBeenCalledTimes(1);
     expect(sessionPrompt).toHaveBeenCalledTimes(2);
     expect(sessionPrompt).toHaveBeenNthCalledWith(2, {
@@ -542,6 +548,17 @@ describe("shared SSE event queue", () => {
     queue.close();
     queue.push(2);
     await expect(queue[Symbol.asyncIterator]().next()).resolves.toEqual({ value: undefined, done: true });
+  });
+});
+describe("shared event hub", () => {
+  it("rejects a waiter when its subscription is canceled before reconnect", async () => {
+    eventSubscribe.mockImplementation(() => new Promise(() => undefined));
+    const hub = new GlobalEventHub(createOpencodeClient() as never);
+    const subscription = hub.subscribe("ses_1", () => 1_000);
+    const rejection = expect(subscription.connected).rejects.toThrow("SSE subscription canceled");
+
+    subscription.unsubscribe();
+    await rejection;
   });
 });
 describe("eventSessionId", () => {
@@ -865,12 +882,12 @@ describe("OpencodeClient.watchSession", () => {
     source.push(textPartUpdated("marker_group_round", "part_round", "ses_1", "[BACKGROUND TASK RESULT READY] still in progress"));
     source.push({
       type: "message.updated",
-      properties: { info: { id: "complete_direct", sessionID: "ses_1", role: "user" } },
+      properties: { info: { id: "complete_direct", sessionID: "ses_1", role: "user", parentID: "marker_direct" } },
     });
     source.push(textPartUpdated("complete_direct", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
     source.push({
       type: "message.updated",
-      properties: { info: { id: "complete_group", sessionID: "ses_1", role: "user" } },
+      properties: { info: { id: "complete_group", sessionID: "ses_1", role: "user", parentID: "marker_group" } },
     });
     source.push(textPartUpdated("complete_group", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
     source.push(textPartUpdated("assistant_direct", "part_3", "ses_1", "direct background"));
@@ -929,15 +946,32 @@ describe("OpencodeClient.watchSession", () => {
       },
     });
     await vi.advanceTimersByTimeAsync(0);
-    source.push({ type: "message.updated", properties: { info: { id: "marker_1", sessionID: "ses_1", role: "user" } } });
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_1", sessionID: "ses_1", role: "user", parentID: "user_1" } },
+    });
     source.push(textPartUpdated("marker_1", "part_1", "ses_1", "[BACKGROUND TASK RESULT READY] first"));
     await vi.advanceTimersByTimeAsync(0);
-    source.push({ type: "message.updated", properties: { info: { id: "marker_2", sessionID: "ses_1", role: "user" } } });
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_2", sessionID: "ses_1", role: "user", parentID: "user_2" } },
+    });
     source.push(textPartUpdated("marker_2", "part_2", "ses_1", "[BACKGROUND TASK RESULT READY] second"));
     await vi.advanceTimersByTimeAsync(0);
-    source.push({ type: "message.updated", properties: { info: { id: "marker_3", sessionID: "ses_1", role: "user" } } });
+    source.push({
+      type: "message.updated",
+      properties: { info: { id: "marker_3", sessionID: "ses_1", role: "user", parentID: "user_3" } },
+    });
     source.push(textPartUpdated("marker_3", "part_3", "ses_1", "[BACKGROUND TASK RESULT READY] third"));
     await vi.advanceTimersByTimeAsync(0);
+    source.push({ type: "message.updated", properties: { info: { id: "ambiguous_complete", sessionID: "ses_1", role: "user" } } });
+    source.push(textPartUpdated("ambiguous_complete", "part_ambiguous", "ses_1", "[ALL BACKGROUND TASKS COMPLETE] ambiguous"));
+    await vi.advanceTimersByTimeAsync(0);
+    source.push(textPartUpdated("ambiguous_assistant", "part_ambiguous_reply", "ses_1", "ambiguous result"));
+    source.push(assistantFinished("ambiguous_assistant", "ses_1", "stop", "ambiguous_complete"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onMessage).not.toHaveBeenCalledWith("ambiguous_assistant", "ambiguous result", "chat1");
+    expect(onMessage).not.toHaveBeenCalledWith("ambiguous_assistant", "ambiguous result", "chat2");
     source.push({
       type: "message.updated",
       properties: { info: { id: "complete_2", sessionID: "ses_1", role: "user", parentID: "marker_2" } },
@@ -1586,7 +1620,7 @@ describe("OpencodeClient.watchSession", () => {
 
     source.push({
       type: "message.updated",
-      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user" } },
+      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user", parentID: "marker_chat1" } },
     });
     source.push(textPartUpdated("complete_chat1", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
     await vi.advanceTimersByTimeAsync(1_001);
@@ -1626,7 +1660,7 @@ describe("OpencodeClient.watchSession", () => {
     await vi.advanceTimersByTimeAsync(0);
     source.push({
       type: "message.updated",
-      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user" } },
+      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user", parentID: "marker_chat1" } },
     });
     source.push(textPartUpdated("complete_chat1", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
     await vi.advanceTimersByTimeAsync(0);
@@ -1721,7 +1755,7 @@ describe("OpencodeClient.watchSession", () => {
     await vi.advanceTimersByTimeAsync(0);
     source.push({
       type: "message.updated",
-      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user" } },
+      properties: { info: { id: "complete_chat1", sessionID: "ses_1", role: "user", parentID: "marker_chat1" } },
     });
     source.push(textPartUpdated("complete_chat1", "part_complete", "ses_1", "[ALL BACKGROUND TASKS COMPLETE]"));
     await vi.advanceTimersByTimeAsync(1_001);
@@ -1821,6 +1855,22 @@ describe("OpencodeClient.watchSession", () => {
     expect(resolved).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(resolved).toBe(true);
+    watch.stop();
+  });
+  it("keeps the exchange alive when the prompt may launch background work", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+    let resolved = false;
+    void watch.awaitIdle().then(() => {
+      resolved = true;
+    });
+
+    watch.markPromptCompleted("chat1", true);
+    release?.();
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(resolved).toBe(false);
     watch.stop();
   });
   it("does not delay an authoritative turn before any SSE assistant activity", async () => {
@@ -1982,6 +2032,22 @@ describe("OpencodeClient.watchSession", () => {
     stop();
   });
 
+  it("reconciles partial SSE text with the complete message", async () => {
+    sessionMessage.mockResolvedValue(
+      ok({ info: { id: "msg_1", sessionID: "ses_1", role: "assistant" }, parts: [{ type: "text", text: "complete" }] }),
+    );
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    source.push(textPartUpdated("msg_1", "part_1", "ses_1", "partial"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("msg_1", "complete");
+    });
+    stop();
+  });
   it("does not deliver recovered text after the watcher is stopped", async () => {
     let resolveRecovery!: (value: ReturnType<typeof ok>) => void;
     const recovery = new Promise<ReturnType<typeof ok>>((resolve) => {

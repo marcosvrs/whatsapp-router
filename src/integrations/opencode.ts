@@ -48,6 +48,7 @@ export interface OpencodeSendResult {
   reply: string;
   messageId: string;
   userMessageId?: string;
+  mayHaveBackgroundWork?: boolean;
 }
 
 // Every error variant has a `name`; only some also have a string `data.message`
@@ -225,12 +226,12 @@ interface GlobalEventSubscription {
   unsubscribe: () => void;
 }
 
-class GlobalEventHub {
+export class GlobalEventHub {
   private readonly listeners = new Set<GlobalEventListener>();
-  private readonly connectionWaiters = new Set<{
-    resolve: () => void;
-    reject: (error: unknown) => void;
-  }>();
+  private readonly connectionWaiters = new Map<
+    GlobalEventListener,
+    { resolve: () => void; reject: (error: unknown) => void }
+  >();
   private controller: AbortController | undefined;
   private runPromise: Promise<void> | undefined;
   private connectionTimer: ReturnType<typeof setTimeout> | undefined;
@@ -264,8 +265,13 @@ class GlobalEventHub {
 
     const connected = this.connected
       ? Promise.resolve()
-      : new Promise<void>((resolve, reject) => this.connectionWaiters.add({ resolve, reject }));
+      : new Promise<void>((resolve, reject) => this.connectionWaiters.set(listener, { resolve, reject }));
     const unsubscribe = (): void => {
+      const waiter = this.connectionWaiters.get(listener);
+      if (waiter) {
+        waiter.reject(new Error("SSE subscription canceled"));
+        this.connectionWaiters.delete(listener);
+      }
       if (!this.listeners.delete(listener)) return;
       listener.queue.close();
       if (this.listeners.size === 0) {
@@ -283,12 +289,12 @@ class GlobalEventHub {
     this.hasConnectedOnce = true;
     clearTimeout(this.connectionTimer);
     this.connectionTimer = undefined;
-    for (const waiter of this.connectionWaiters) waiter.resolve();
+    for (const waiter of this.connectionWaiters.values()) waiter.resolve();
     this.connectionWaiters.clear();
   }
 
   private failInitial(errorValue: unknown): void {
-    for (const waiter of this.connectionWaiters) waiter.reject(errorValue);
+    for (const waiter of this.connectionWaiters.values()) waiter.reject(errorValue);
     this.connectionWaiters.clear();
     for (const listener of this.listeners) listener.queue.close();
     this.listeners.clear();
@@ -422,7 +428,7 @@ export interface OpencodeSessionWatch {
   acquirePrompt: (chatId: string) => ((cancel?: boolean, userMessageId?: string) => void) | undefined;
   // Marks the prompt HTTP result as a completed assistant turn even if SSE
   // missed its completion event.
-  markPromptCompleted: (chatId?: string) => void;
+  markPromptCompleted: (chatId?: string, mayHaveBackgroundWork?: boolean) => void;
   stop: () => void;
 }
 
@@ -507,6 +513,7 @@ export class OpencodeClient {
     }
 
     const { info, parts } = result.data;
+    const mayHaveBackgroundWork = parts.some((part) => part.type !== "text");
     if (info.error) {
       const errMsg = errorMessage(info.error);
       warn("opencode agent error", errMsg);
@@ -515,6 +522,7 @@ export class OpencodeClient {
         reply: `Agent error: ${errMsg}`,
         messageId: info.id,
         userMessageId: info.parentID,
+        mayHaveBackgroundWork,
       };
     }
 
@@ -524,6 +532,7 @@ export class OpencodeClient {
       reply: reply || "(no output)",
       messageId: info.id,
       userMessageId: info.parentID,
+      mayHaveBackgroundWork,
     };
   }
 
@@ -548,6 +557,7 @@ export class OpencodeClient {
     const chatByMessage = new Map<string, string>();
     const userMessageMetadata = new Map<string, { system?: string; parentMessageId?: string }>();
     const processedUserMessages = new Set<string>();
+    let promptMayStartBackgroundWork = false;
     const backgroundDestinations: { chatId: string; pending: boolean; userMessageId?: string }[] = [];
     const chatLifecycles = new Map<string, ChatLifecycle>();
     const seenAssistantMessages = new Set<string>();
@@ -613,7 +623,7 @@ export class OpencodeClient {
     };
 
     const scheduleIdleSettle = (): void => {
-      if (sessionBusy || backgroundWorkPending || promptLeases > 0 || !hasCompletedAssistantTurn) return;
+      if (sessionBusy || backgroundWorkPending || promptLeases > 0 || !hasCompletedAssistantTurn || promptMayStartBackgroundWork) return;
       clearIdleCandidate();
       // Give the background-task plugin a short window to inject its status
       // marker after an idle event. Plain one-turn exchanges then release
@@ -718,12 +728,10 @@ export class OpencodeClient {
       if (state !== undefined) {
         if (state) {
           const normalized = text.trim();
-          const destination =
-            linkedDestination ??
-            (normalized.startsWith("[BACKGROUND TASK RETRY")
-              ? backgroundDestinations.findLast((item) => item.pending)
-              : backgroundDestinations.find((item) => !item.pending) ??
-                backgroundDestinations.findLast((item) => item.pending));
+          const candidates = normalized.startsWith("[BACKGROUND TASK RETRY")
+            ? backgroundDestinations.filter((item) => item.pending)
+            : backgroundDestinations.filter((item) => !item.pending);
+          const destination = linkedDestination ?? (candidates.length === 1 ? candidates[0] : undefined);
           if (destination) {
             destination.pending = true;
             chatByMessage.set(messageId, destination.chatId);
@@ -731,19 +739,26 @@ export class OpencodeClient {
             unassignedBackgroundPending = false;
           } else {
             unassignedBackgroundPending = true;
+            warn("discarding uncorrelated background progress marker", messageId);
           }
         } else {
-          const destination = linkedDestination ?? backgroundDestinations.find((item) => item.pending);
+          const candidates = backgroundDestinations.filter((item) => item.pending);
+          const destination = linkedDestination ?? (candidates.length === 1 ? candidates[0] : undefined);
           if (destination) {
             destination.pending = false;
             chatByMessage.set(messageId, destination.chatId);
             backgroundDestinations.splice(backgroundDestinations.indexOf(destination), 1);
             refreshChatBackground(destination.chatId);
           } else {
-            unassignedBackgroundPending = false;
+            warn("discarding uncorrelated background completion marker", messageId);
+            if (backgroundDestinations.length === 0) unassignedBackgroundPending = false;
           }
         }
         backgroundWorkPending = unassignedBackgroundPending || backgroundDestinations.some((item) => item.pending);
+        if (!backgroundWorkPending) {
+          promptMayStartBackgroundWork = false;
+          scheduleIdleSettle();
+        }
       }
       const markerPrefix = mayBeBackgroundMarkerPrefix(text);
       if (!text.trim()) return false;
@@ -879,9 +894,10 @@ export class OpencodeClient {
                     markAssistantSeen(info.id);
                   if (info.finish !== "tool-calls") sessionBusy = false;
                     hasCompletedAssistantTurn = true;
+                    const recoveredText = info.error ? "" : await recoverMessageText(info.id);
                     const reply = info.error
                       ? `Agent error: ${errorMessage(info.error)}`
-                      : text || (await recoverMessageText(info.id));
+                      : recoveredText || text;
                     if (isActive()) {
                       if (reply) {
                         if (destinationChatId) onMessage(info.id, reply, destinationChatId);
@@ -969,8 +985,9 @@ export class OpencodeClient {
         resetQuietTimer();
       };
     };
-    const markPromptCompleted = (chatId?: string): void => {
+    const markPromptCompleted = (chatId?: string, mayHaveBackgroundWork = false): void => {
       if (controller.signal.aborted) return;
+      promptMayStartBackgroundWork ||= mayHaveBackgroundWork || sessionBusy;
       hasCompletedAssistantTurn = true;
       sessionBusy = false;
       if (chatId) {
@@ -978,7 +995,7 @@ export class OpencodeClient {
         lifecycle.completedPrompts += 1;
         scheduleChatIdle(chatId);
       }
-      scheduleIdleSettle();
+      if (!promptMayStartBackgroundWork) scheduleIdleSettle();
       resetQuietTimer();
     };
 

@@ -3,7 +3,11 @@ name: Create and publish a Docker image
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["Lint, Build & Test"]
+    workflows:
+      - "Lint, Build & Test"
+      - "Mutation Testing"
+      - "NPM Audit"
+      - "socket-security-workflow"
     types: ["completed"]
     branches: [main]
 
@@ -53,6 +57,24 @@ jobs:
             echo "should_push=$SHOULD_PUSH"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify required checks for image commit
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          checks="$(gh api --paginate --slurp \
+            "repos/${REPOSITORY}/commits/${COMMIT_SHA}/check-runs?per_page=100")"
+          for required in lint-build-test mutation npm-audit socket-security; do
+            if ! jq -e --arg name "$required" --arg sha "$COMMIT_SHA" \
+              '[.[]?.check_runs[]? | select(.name == $name and .head_sha == $sha and .conclusion == "success")] | length > 0' \
+              <<<"$checks" >/dev/null; then
+              echo "Required check has not passed for ${COMMIT_SHA}: ${required}"
+              exit 1
+            fi
+          done
       - name: Checkout repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

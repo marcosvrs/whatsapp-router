@@ -80,8 +80,13 @@ export class TypingPresence {
         },
       );
       try {
-        if (id) await this.waha.sendText(chatId, text, id);
-        else await this.waha.sendText(chatId, text);
+      if (this.waha.sendTextWithSignal) {
+        await boundedPresenceRequest("sendText", (signal) =>
+          this.waha.sendTextWithSignal?.(chatId, text, id, signal) ?? Promise.resolve(),
+        );
+      } else {
+        await boundedPresenceRequest("sendText", () => (id ? this.waha.sendText(chatId, text, id) : this.waha.sendText(chatId, text)));
+      }
       } finally {
         if ((this.activeCount.get(chatId) ?? 0) > 0) {
           await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal)).catch(

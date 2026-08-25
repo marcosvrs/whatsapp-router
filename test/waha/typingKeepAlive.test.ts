@@ -238,6 +238,28 @@ describe("TypingPresence", () => {
   });
 
 
+  it("uses a signal-aware WAHA send when available", async () => {
+    const waha = fakeWaha();
+    waha.sendTextWithSignal = vi.fn().mockResolvedValue(undefined);
+    const typing = new TypingPresence(waha);
+
+    await expect(typing.send("chat1", "hello")).resolves.toBeUndefined();
+    expect(waha.sendTextWithSignal).toHaveBeenCalledWith("chat1", "hello", undefined, expect.any(AbortSignal));
+  });
+  it("bounds a hung sendText request while keeping typing state recoverable", async () => {
+    const waha = fakeWaha();
+    waha.sendText = vi.fn().mockImplementation(() => new Promise<void>(() => undefined));
+    const typing = new TypingPresence(waha);
+    typing.begin("chat1");
+    await vi.advanceTimersByTimeAsync(0);
+
+    const sendPromise = typing.send("chat1", "hello");
+    const rejection = expect(sendPromise).rejects.toThrow("sendText timed out");
+    await vi.advanceTimersByTimeAsync(PRESENCE_REQUEST_TIMEOUT_MS);
+    await rejection;
+    expect(waha.startTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
+    await typing.end("chat1");
+  });
   it("orders an in-flight refresh before stopTyping and sendText", async () => {
     const calls: string[] = [];
     let releaseRefresh!: () => void;

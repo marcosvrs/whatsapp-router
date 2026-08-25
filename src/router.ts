@@ -89,7 +89,7 @@ export interface ActiveAgentExchange {
   acquirePrompt: (chatId: string) => ((cancel?: boolean, userMessageId?: string) => void) | undefined;
   awaitChatIdle?: (chatId: string) => Promise<void>;
   awaitTurn?: (messageId: string) => Promise<void>;
-  markPromptCompleted: (chatId?: string) => void;
+  markPromptCompleted: (chatId?: string, mayHaveBackgroundWork?: boolean) => void;
   deliver: (messageId: string, text: string, chatId: string) => void;
   stop: () => void;
 }
@@ -97,11 +97,14 @@ export interface ActiveAgentExchange {
 interface PendingDelivery {
   text: string;
   chatId: string;
+  attempts: number;
   fallback?: PendingDelivery;
 }
+const MAX_DELIVERY_ATTEMPTS = 2;
 
 export class AgentExchangeManager {
   private readonly active = new Map<string, ActiveAgentExchange>();
+  private readonly generations = new Map<string, number>();
 
   async acquire(
     deps: RouterDeps,
@@ -114,6 +117,7 @@ export class AgentExchangeManager {
     release: (cancel?: boolean, userMessageId?: string) => void;
   }> {
     const current = this.active.get(senderKey);
+    const generation = this.currentGeneration(senderKey);
     if (current?.sessionId === sessionId && current.reusable !== false) {
       const release = current.acquirePrompt(chatId);
       if (release) return { exchange: current, created: false, release };
@@ -122,14 +126,20 @@ export class AgentExchangeManager {
 
     const delivered = new Set<string>();
     const inFlight = new Map<string, PendingDelivery>();
-    const enqueueDelivery = (messageId: string, text: string, destinationChatId: string): void => {
+    const enqueueDelivery = (
+      messageId: string,
+      text: string,
+      destinationChatId: string,
+      attempts = 0,
+    ): void => {
+      if (generation !== this.currentGeneration(senderKey)) return;
       if (delivered.has(messageId)) return;
       const pending = inFlight.get(messageId);
       if (pending) {
-        pending.fallback = { text, chatId: destinationChatId };
+        pending.fallback = { text, chatId: destinationChatId, attempts: pending.attempts };
         return;
       }
-      const delivery: PendingDelivery = { text, chatId: destinationChatId };
+      const delivery: PendingDelivery = { text, chatId: destinationChatId, attempts };
       debug("agent turn delivery queued", messageId, destinationChatId);
       inFlight.set(messageId, delivery);
       void deliver(deps, destinationChatId, text, messageId)
@@ -141,10 +151,12 @@ export class AgentExchangeManager {
         .catch((err: unknown) => {
           inFlight.delete(messageId);
           error("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
-          const fallback: PendingDelivery | undefined = delivery.fallback;
-          if (delivery.fallback) {
+          const fallback: PendingDelivery = delivery.fallback ?? delivery;
+          if (delivery.attempts + 1 < MAX_DELIVERY_ATTEMPTS) {
             warn("retrying agent turn delivery", messageId);
-            enqueueDelivery(messageId, fallback?.text ?? "", fallback?.chatId ?? "");
+            enqueueDelivery(messageId, fallback.text, fallback.chatId, delivery.attempts + 1);
+          } else {
+            error("agent turn delivery retries exhausted", messageId);
           }
         });
     };
@@ -169,8 +181,8 @@ export class AgentExchangeManager {
       acquirePrompt: (nextChatId) => watch.acquirePrompt(nextChatId),
       awaitChatIdle: watch.awaitChatIdle,
       awaitTurn: watch.awaitTurn,
-      markPromptCompleted: (nextChatId) => {
-        watch.markPromptCompleted(nextChatId);
+      markPromptCompleted: (nextChatId, mayHaveBackgroundWork) => {
+        watch.markPromptCompleted(nextChatId, mayHaveBackgroundWork);
       },
       deliver: (messageId, text, destinationChatId) => {
         enqueueDelivery(messageId, text, destinationChatId);
@@ -190,6 +202,16 @@ export class AgentExchangeManager {
     const current = this.active.get(senderKey);
     if (expected && current !== expected) return;
     current?.stop();
+  }
+
+  currentGeneration(senderKey: string): number {
+    return this.generations.get(senderKey) ?? 0;
+  }
+
+  bumpGeneration(senderKey: string): number {
+    const next = this.currentGeneration(senderKey) + 1;
+    this.generations.set(senderKey, next);
+    return next;
   }
 }
 
@@ -245,6 +267,7 @@ async function handleAgent(
 
   let exchange!: ActiveAgentExchange;
   let exchangeIsLive: boolean | undefined;
+  let exchangeCreated = false;
   let waitForExchange: Promise<void> = Promise.resolve();
   let endTyping: () => Promise<void> = () => Promise.resolve();
   let promptSucceeded = false;
@@ -265,6 +288,7 @@ async function handleAgent(
         const acquired = await deps.exchanges.acquire(deps, senderKey, sessionId, chatId);
         exchange = acquired.exchange;
         exchangeIsLive = acquired.exchange.isLive !== false;
+        exchangeCreated = acquired.created;
         waitForExchange =
           acquired.exchange.awaitChatIdle?.(chatId) ??
           (acquired.created ? acquired.exchange.done : Promise.resolve());
@@ -278,6 +302,7 @@ async function handleAgent(
           const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
           exchange = replacement.exchange;
           exchangeIsLive = replacement.exchange.isLive !== false;
+          exchangeCreated = replacement.created;
           waitForExchange = replacement.exchange.awaitChatIdle?.(chatId) ?? replacement.exchange.done;
           releasePrompt = replacement.release;
           promptReleased = false;
@@ -293,7 +318,7 @@ async function handleAgent(
           if (err instanceof OpencodeSendError) {
             releasePrompt(true);
             promptReleased = true;
-            if (acquired.created) deps.exchanges.stop(senderKey, exchange);
+            if (exchangeCreated) deps.exchanges.stop(senderKey, exchange);
           }
           throw err;
         }
@@ -304,7 +329,7 @@ async function handleAgent(
         promptUserMessageId = result.userMessageId;
         releasePrompt(false, promptUserMessageId);
         promptReleased = true;
-        exchange.markPromptCompleted(chatId);
+        exchange.markPromptCompleted(chatId, result.mayHaveBackgroundWork);
         await exchange.awaitTurn?.(result.messageId);
         exchange.deliver(result.messageId, result.reply, chatId);
       } finally {
@@ -353,9 +378,13 @@ export async function routeMessage(
   const newMatch = /^\/new\b(.*)$/i.exec(trimmed);
 
   if (newMatch) {
-    deps.exchanges.stop(senderKey);
-    deps.sessions.reset(senderKey);
     const rest = (newMatch[1] ?? "").trim();
+    await deps.senderLock.run(senderKey, () => {
+      deps.exchanges.bumpGeneration(senderKey);
+      deps.exchanges.stop(senderKey);
+      deps.sessions.reset(senderKey);
+      return Promise.resolve();
+    });
     if (!rest && !hasMedia(extras) && !extras.context?.locationText) {
       return "Started a new conversation.";
     }

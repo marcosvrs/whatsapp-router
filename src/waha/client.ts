@@ -19,7 +19,8 @@ export interface WahaSessionInfo {
 }
 
 export interface WahaClientLike {
-  sendText: (chatId: string, text: string, id?: string) => Promise<void>;
+  sendText: (chatId: string, text: string, id?: string, signal?: AbortSignal) => Promise<void>;
+  sendTextWithSignal?: (chatId: string, text: string, id: string | undefined, signal: AbortSignal) => Promise<void>;
   startTyping: (chatId: string, signal?: AbortSignal) => Promise<void>;
   stopTyping: (chatId: string, signal?: AbortSignal) => Promise<void>;
   markChatRead: (chatId: string) => Promise<void>;
@@ -53,15 +54,24 @@ export class WahaClient implements WahaClientLike {
     }
   }
 
-  async sendText(chatId: string, text: string, id?: string): Promise<void> {
-    const res = await this.call("POST", "/api/sendText", {
-      session: this.session,
-      chatId,
-      text,
-      ...(id ? { id } : {}),
-    });
+  async sendText(chatId: string, text: string, id?: string, signal?: AbortSignal): Promise<void> {
+    const res = await this.call(
+      "POST",
+      "/api/sendText",
+      {
+        session: this.session,
+        chatId,
+        text,
+        ...(id ? { id } : {}),
+      },
+      signal,
+    );
     await this.logIfFailed("sendText", res);
     if (!res.ok) throw new Error(`sendText failed with HTTP ${String(res.status)}`);
+  }
+
+  async sendTextWithSignal(chatId: string, text: string, id: string | undefined, signal: AbortSignal): Promise<void> {
+    await this.sendText(chatId, text, id, signal);
   }
 
   async startTyping(chatId: string, signal?: AbortSignal): Promise<void> {

@@ -1,53 +1,26 @@
-# Socket Security GitHub Actions Workflow
-# Runs Socket Security scans on every commit/PR to catch supply-chain
-# issues (malicious packages, typosquats, install-script abuse, etc.)
-# before they merge.
-#
-# Setup required before this workflow will run successfully:
-#   1. Create a Socket.dev account and generate an API key
-#   2. Add it as a repository (or org) secret named SOCKET_SECURITY_API_KEY
-# Until then, this workflow will fail at the "Run Socket Security Scan" step.
-
+ # Socket Security scans run only from the protected main branch. Pull
+ # requests and arbitrary branch pushes are intentionally excluded because
+ # the scan requires a secret and executes against checked-out repository data.
 name: socket-security-workflow
 run-name: Socket Security Github Action
 
+
 on:
   push:
-    branches: ['**']  # Run on all branches, all commits
-  pull_request:
-    types: [opened, synchronize, reopened]
-  issue_comment:
-    types: [created]
+    branches: [main]
+  workflow_dispatch:
 
 # Prevent concurrent runs for the same commit
 concurrency:
   group: >-
-    socket-scan-${{
-      github.event_name == 'issue_comment' &&
-      format('issue-{0}', github.event.issue.number) ||
-      github.ref
-    }}-${{ github.sha }}
+    socket-scan-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:
   socket-security:
-    if: >-
-      ${{
-        github.event_name != 'issue_comment' ||
-        (
-          github.event.issue.pull_request != null &&
-          startsWith(github.event.comment.body, '/socket scan') &&
-          (
-            github.event.comment.author_association == 'COLLABORATOR' ||
-            github.event.comment.author_association == 'MEMBER' ||
-            github.event.comment.author_association == 'OWNER'
-          )
-        )
-      }}
+    if: github.ref_name == 'main'
     permissions:
-      issues: write
       contents: read
-      pull-requests: write
     runs-on: ubuntu-latest
 
     steps:
@@ -79,15 +52,9 @@ jobs:
       - name: Run Socket Security Scan
         env:
           SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
-          GH_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_API_TOKEN: ${{ github.token }}
         run: |
-          # Determine PR number based on event type
           PR_NUMBER=0
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            PR_NUMBER=${{ github.event.pull_request.number }}
-          elif [ "${{ github.event_name }}" == "issue_comment" ]; then
-            PR_NUMBER=${{ github.event.issue.number }}
-          fi
 
           socketcli \
             --target-path "$GITHUB_WORKSPACE" \

@@ -8,6 +8,7 @@ import { SenderLock } from "../src/senderLock.js";
 import { SessionStore } from "../src/sessionStore.js";
 import type { WahaClientLike } from "../src/waha/client.js";
 import { TypingPresence } from "../src/waha/typingKeepAlive.js";
+import { getLogLevel, setLogLevel } from "../src/log.js";
 import { requestUrl } from "./testUtils.js";
 
 const CHAT_ID = "chat1";
@@ -800,7 +801,8 @@ describe("routeMessage — agent context", () => {
     manager.stop("111", acquired.exchange);
   });
 
-  it("does not retry a delivery failure when no fallback turn exists", async () => {
+  it("bounds delivery retries when no fallback turn exists", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const send = vi.spyOn(deps.typing, "send").mockRejectedValue(new Error("permanent WAHA failure"));
     const watch = {
       awaitIdle: () => new Promise<void>(() => undefined),
@@ -814,10 +816,31 @@ describe("routeMessage — agent context", () => {
 
     acquired.exchange.deliver("msg_1", "reply", "chat1");
     await vi.waitFor(() => {
-      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledTimes(2);
     });
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "agent turn delivery retries exhausted",
+      "msg_1",
+    ]);
+    manager.stop("111", acquired.exchange);
+  });
+  it("drops deliveries from an exchange invalidated by /new", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    expect(manager.bumpGeneration("111")).toBe(1);
+    acquired.exchange.deliver("stale", "old reply", "chat1");
     await Promise.resolve();
-    expect(send).toHaveBeenCalledTimes(1);
+
+    expect(send).not.toHaveBeenCalled();
     manager.stop("111", acquired.exchange);
   });
 
@@ -865,6 +888,30 @@ describe("routeMessage — agent context", () => {
     });
 
   });
+  it("blocks exchange reuse after an ambiguous outcome", async () => {
+    deps.sessions.set("111", "ses_1");
+    const done = new Promise<void>(() => undefined);
+    const makeWatch = () => ({
+      isLive: true,
+      awaitIdle: () => done,
+      awaitChatIdle: () => Promise.resolve(),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    });
+    const watchSession = vi
+      .spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(makeWatch())
+      .mockResolvedValueOnce(makeWatch());
+    vi.spyOn(deps.opencode, "send").mockRejectedValue(new Error("connection reset"));
+
+    await routeMessage(deps, "111", CHAT_ID, "hi");
+    const replacement = await deps.exchanges.acquire(deps, "111", "ses_1", "chat2");
+
+    expect(watchSession).toHaveBeenCalledTimes(2);
+    expect(replacement.created).toBe(true);
+    replacement.exchange.stop();
+  });
   it("defers ambiguous failure after a live session replacement", async () => {
     deps.sessions.set("111", "ses_1");
     const makeWatch = (isLive: boolean) => ({
@@ -908,6 +955,32 @@ describe("routeMessage — agent context", () => {
 
     await routeMessage(deps, "111", CHAT_ID, "hi");
 
+    expect(sendNotice).toHaveBeenCalledWith(CHAT_ID, "Agent call failed — check whatsapp-router logs.");
+  });
+  it("stops a replacement watcher after a definitive retry rejection", async () => {
+    deps.sessions.set("111", "ses_1");
+    const firstStop = vi.fn();
+    const replacementStop = vi.fn();
+    const makeWatch = (isLive: boolean, stop: () => void) => ({
+      isLive,
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop,
+    });
+    vi.spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(makeWatch(true, firstStop))
+      .mockResolvedValueOnce(makeWatch(true, replacementStop));
+    vi.spyOn(deps.opencode, "send").mockImplementation(async (_sessionId, _text, options) => {
+      await options?.onSessionReplaced?.("ses_new");
+      throw new OpencodeSendError(500);
+    });
+    const sendNotice = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+
+    await routeMessage(deps, "111", CHAT_ID, "hi");
+
+    expect(firstStop).toHaveBeenCalledTimes(1);
+    expect(replacementStop).toHaveBeenCalledTimes(1);
     expect(sendNotice).toHaveBeenCalledWith(CHAT_ID, "Agent call failed — check whatsapp-router logs.");
   });
 
@@ -981,8 +1054,41 @@ describe("routeMessage — agent context", () => {
       expect(send).toHaveBeenCalledTimes(1);
     });
     acquired.exchange.deliver("msg_1", "reply", CHAT_ID);
+    await Promise.resolve();
     expect(send).toHaveBeenCalledTimes(1);
     acquired.release();
+    manager.stop("111", acquired.exchange);
+  });
+  it("finalizes delivery deduplication only after a successful send", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const previousLevel = getLogLevel();
+    setLogLevel("debug");
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", CHAT_ID);
+
+    acquired.exchange.deliver("msg_2", "reply", CHAT_ID);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    await Promise.resolve();
+    acquired.exchange.deliver("msg_2", "reply", CHAT_ID);
+    await Promise.resolve();
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "agent turn delivered",
+      "msg_2",
+      CHAT_ID,
+    ]);
+    setLogLevel(previousLevel);
     manager.stop("111", acquired.exchange);
   });
 

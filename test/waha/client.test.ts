@@ -65,6 +65,17 @@ describe("WahaClient.sendText", () => {
     expect(logSpy).not.toHaveBeenCalled();
   });
 
+  it("passes an abort signal through the signal-aware send method", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+
+    await client.sendTextWithSignal("111@c.us", "hello", "id1", signal);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBe(signal);
+  });
   it("falls back to an empty string when reading the failure body itself rejects", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const badResponse = new Response(null, { status: 500 });
