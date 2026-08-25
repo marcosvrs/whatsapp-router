@@ -61,6 +61,7 @@ export class WahaClient implements WahaClientLike {
       ...(id ? { id } : {}),
     });
     await this.logIfFailed("sendText", res);
+    if (!res.ok) throw new Error(`sendText failed with HTTP ${String(res.status)}`);
   }
 
   async startTyping(chatId: string, signal?: AbortSignal): Promise<void> {

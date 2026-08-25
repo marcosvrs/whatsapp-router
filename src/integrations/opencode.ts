@@ -7,7 +7,7 @@ import {
   type Part,
   type TextPartInput,
 } from "@opencode-ai/sdk";
-import { debug, error, info, warn } from "../log.js";
+import { error, info, warn } from "../log.js";
 
 export interface OpencodeClientOptions {
   baseUrl: string;
@@ -158,6 +158,242 @@ export const TURN_RECONCILE_MS = 100;
 // cuts off a real, still-working exchange; it only exists to bound a
 // genuinely stuck/leaked connection.
 export const MAX_WAIT_MS = 6 * 60 * 60_000;
+const GLOBAL_STREAM_ENDED = Symbol("global-sse-stream-ended");
+
+type QueueWaiter<T> = (result: IteratorResult<T>) => void;
+
+interface EventQueue<T> extends AsyncIterable<T> {
+  push: (value: T) => void;
+  close: () => void;
+}
+
+export function createEventQueue<T>(): EventQueue<T> {
+  const values: T[] = [];
+  const waiters: QueueWaiter<T>[] = [];
+  let closed = false;
+  return {
+    push(value) {
+      if (closed) return;
+      values.push(value);
+      const waiter = waiters.shift();
+      if (waiter) waiter({ value: values.shift() as T, done: false });
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      while (waiters.length > 0) {
+        const waiter = waiters.shift();
+        if (waiter) waiter({ value: undefined as T, done: true });
+      }
+    },
+    [Symbol.asyncIterator]() {
+      return {
+        next: (): Promise<IteratorResult<T>> => {
+          if (values.length > 0) return Promise.resolve({ value: values.shift() as T, done: false });
+          if (closed) return Promise.resolve({ value: undefined as T, done: true });
+          return new Promise((resolve) => waiters.push(resolve));
+        },
+      };
+    },
+  };
+}
+
+export function eventSessionId(event: unknown): string | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const properties = (event as { properties?: unknown }).properties;
+  if (!properties || typeof properties !== "object") return undefined;
+  const candidate = properties as Record<string, unknown>;
+  if (typeof candidate.sessionID === "string") return candidate.sessionID;
+  for (const key of ["info", "part"]) {
+    const nested = candidate[key];
+    if (nested && typeof nested === "object" && typeof (nested as { sessionID?: unknown }).sessionID === "string") {
+      return (nested as { sessionID: string }).sessionID;
+    }
+  }
+  return undefined;
+}
+
+interface GlobalEventListener {
+  sessionId: string;
+  queue: EventQueue<unknown>;
+  reconnectDelay: () => number | undefined;
+}
+
+interface GlobalEventSubscription {
+  stream: AsyncIterable<unknown>;
+  connected: Promise<void>;
+  unsubscribe: () => void;
+}
+
+class GlobalEventHub {
+  private readonly listeners = new Set<GlobalEventListener>();
+  private readonly connectionWaiters = new Set<{
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }>();
+  private controller: AbortController | undefined;
+  private runPromise: Promise<void> | undefined;
+  private connectionTimer: ReturnType<typeof setTimeout> | undefined;
+  private connected = false;
+
+  constructor(private readonly client: SdkClient) {}
+
+  subscribe(sessionId: string, reconnectDelay: () => number | undefined): GlobalEventSubscription {
+    const listener: GlobalEventListener = { sessionId, reconnectDelay, queue: createEventQueue<unknown>() };
+    this.listeners.add(listener);
+    if (!this.runPromise || this.controller?.signal.aborted) {
+      const controller = new AbortController();
+      this.controller = controller;
+      this.connected = false;
+      this.connectionTimer = setTimeout(() => {
+        this.failInitial(new Error("SSE connection timed out"));
+      }, SSE_CONNECT_TIMEOUT_MS);
+      this.runPromise = this.run(controller).finally(() => {
+        /* c8 ignore next -- protects a newer hub run from an old finalizer. */
+        if (this.controller !== controller) return;
+        clearTimeout(this.connectionTimer);
+        this.connectionTimer = undefined;
+        this.runPromise = undefined;
+        this.controller = undefined;
+        this.connected = false;
+      });
+    }
+
+    const connected = this.connected
+      ? Promise.resolve()
+      : new Promise<void>((resolve, reject) => this.connectionWaiters.add({ resolve, reject }));
+    const unsubscribe = (): void => {
+      if (!this.listeners.delete(listener)) return;
+      listener.queue.close();
+      if (this.listeners.size === 0) {
+        this.controller?.abort();
+        clearTimeout(this.connectionTimer);
+        this.connectionTimer = undefined;
+      }
+    };
+    return { stream: listener.queue, connected, unsubscribe };
+  }
+
+  private markConnected(): void {
+    if (this.connected) return;
+    this.connected = true;
+    clearTimeout(this.connectionTimer);
+    this.connectionTimer = undefined;
+    for (const waiter of this.connectionWaiters) waiter.resolve();
+    this.connectionWaiters.clear();
+  }
+
+  private failInitial(errorValue: unknown): void {
+    for (const waiter of this.connectionWaiters) waiter.reject(errorValue);
+    this.connectionWaiters.clear();
+    for (const listener of this.listeners) listener.queue.close();
+    this.listeners.clear();
+    this.controller?.abort();
+  }
+
+  private dispatch(event: unknown): void {
+    const sessionId = eventSessionId(event);
+    for (const listener of this.listeners) {
+      if (!sessionId || listener.sessionId === sessionId) listener.queue.push(event);
+    }
+  }
+  private pushStreamEnded(): void {
+    for (const listener of this.listeners) listener.queue.push(GLOBAL_STREAM_ENDED);
+  }
+
+  private nextReconnectDelay(): number | undefined {
+    const delays = [...this.listeners]
+      .map((listener) => listener.reconnectDelay())
+      .filter((delay): delay is number => delay !== undefined);
+    return delays.length > 0 ? Math.min(...delays) : undefined;
+  }
+
+  private waitBeforeReconnect(controller: AbortController, delay: number): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer);
+        controller.signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, delay);
+      controller.signal.addEventListener("abort", finish, { once: true });
+    });
+  }
+
+  private async run(controller: AbortController): Promise<void> {
+    let hadSseError = false;
+    const isAborted = (): boolean => controller.signal.aborted;
+    const sawSseError = (): boolean => hadSseError;
+      while (!isAborted() && this.listeners.size > 0) {
+        let stream: AsyncIterable<unknown>;
+        try {
+          const result = await this.client.event.subscribe({
+            signal: controller.signal,
+            sseMaxRetryAttempts: 3,
+            onSseEvent: () => {
+              this.markConnected();
+            },
+            onSseError: (err) => {
+              hadSseError = true;
+              warn("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
+            },
+          });
+          stream = result.stream;
+        } catch (err) {
+          /* c8 ignore next -- abort can race an in-flight SDK subscription. */
+          if (isAborted()) break;
+          if (!this.connected) {
+            this.failInitial(err);
+            return;
+          }
+          warn("watchSession reconnect failed, retrying", err instanceof Error ? err.message : String(err));
+          await this.waitBeforeReconnect(controller, 1_000);
+          continue;
+        }
+
+        try {
+          for await (const event of stream) {
+            if (isAborted()) break;
+            this.markConnected();
+            this.dispatch(event);
+          }
+        } catch (err) {
+          if (!isAborted()) {
+            error("watchSession stream error", err instanceof Error ? err.message : String(err));
+          }
+        }
+        if (isAborted() || this.listeners.size === 0) break;
+        if (!this.connected) {
+          this.failInitial(new Error("SSE stream ended before connection"));
+          return;
+        }
+        this.pushStreamEnded();
+        if (sawSseError()) {
+          error(
+            "watchSession stream ended after connection retries were exhausted — " +
+              "may not reflect the session actually being done",
+          );
+        }
+        hadSseError = false;
+        await Promise.resolve();
+        let delay = this.nextReconnectDelay();
+        if (delay === undefined) {
+          this.pushStreamEnded();
+          await Promise.resolve();
+          delay = this.nextReconnectDelay();
+        }
+        if (delay === undefined) continue;
+        await this.waitBeforeReconnect(controller, delay);
+        if (isAborted() || this.listeners.size === 0) break;
+        if (this.nextReconnectDelay() === undefined) {
+          this.pushStreamEnded();
+          await Promise.resolve();
+          if (this.listeners.size === 0) break;
+        }
+      }
+  }
+}
+
 
 export interface OpencodeSessionWatch {
   // Resolves once the session has gone quiet (or the hard ceiling is hit).
@@ -185,6 +421,7 @@ export class OpencodeClient {
   private readonly authHeader: string;
   private readonly modelProvider: string;
   private readonly modelId: string;
+  private readonly events: GlobalEventHub;
 
   constructor(options: OpencodeClientOptions) {
     this.authHeader = options.authHeader;
@@ -194,6 +431,7 @@ export class OpencodeClient {
       baseUrl: options.baseUrl,
       headers: this.authHeader ? { Authorization: this.authHeader } : undefined,
     });
+    this.events = new GlobalEventHub(this.client);
   }
 
   isConfigured(): boolean {
@@ -283,9 +521,9 @@ export class OpencodeClient {
   // as it happens. It is started before send() so a single prompt's internal
   // multi-step loop cannot lose intermediate turns. The message id lets the
   // caller dedupe the same turn observed by both the SSE stream and send().
-  // One request-scoped SSE watch is opened for each active exchange; the
-  // router-level AgentExchangeManager ensures concurrent prompts for one
-  // sender reuse that watch instead of creating duplicate deliveries.
+  // A single global SSE subscription is shared by all active exchanges on
+  // this client; the hub dispatches only session-matching events to each
+  // watcher.
   // Delivery fires on any completed assistant turn (any truthy `finish`, not
   // just "stop").
   async watchSession(
@@ -308,23 +546,14 @@ export class OpencodeClient {
     let unassignedBackgroundPending = false;
     let quietTimer: ReturnType<typeof setTimeout>;
     let idleCandidateTimer: ReturnType<typeof setTimeout> | undefined;
-    let connectionTimer: ReturnType<typeof setTimeout> | undefined;
-    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let resolveIdle: () => void;
-    let resolveConnection!: () => void;
-    let rejectConnection!: (error: unknown) => void;
-    const connectionErrorState = { hadError: false, attempts: 0 };
+    const unsubscribeRef: { current?: () => void } = {};
     let hasCompletedAssistantTurn = false;
     let sessionBusy = false;
     let backgroundWorkPending = false;
     let promptLeases = 0;
-    let connected = false;
     let promptLeaseAcquired = false;
     let live = true;
-    const connectionPromise = new Promise<void>((resolve, reject) => {
-      resolveConnection = resolve;
-      rejectConnection = reject;
-    });
     const idlePromise = new Promise<void>((resolve) => {
       resolveIdle = resolve;
     });
@@ -338,10 +567,7 @@ export class OpencodeClient {
       clearTimeout(quietTimer);
       clearTimeout(ceilingTimer);
       clearIdleCandidate();
-      clearTimeout(connectionTimer);
-      clearTimeout(reconnectTimer);
-      connectionTimer = undefined;
-      reconnectTimer = undefined;
+      unsubscribeRef.current?.();
       for (const lifecycle of chatLifecycles.values()) {
         clearTimeout(lifecycle.idleTimer);
         for (const resolve of lifecycle.waiters) resolve();
@@ -466,43 +692,7 @@ export class OpencodeClient {
     };
     const hasTrackedWork = (): boolean =>
       sessionBusy || backgroundWorkPending || promptLeases > 0 || idleCandidateTimer !== undefined;
-    const reconnect = async (): Promise<void> => {
-      if (controller.signal.aborted || !hasTrackedWork()) return;
-      connectionErrorState.hadError = false;
-      connectionErrorState.attempts = 0;
-      try {
-        const { stream } = await subscribe();
-        scheduleIdleSettle();
-        await consume(stream);
-      } catch (err) {
-        warn("watchSession reconnect failed, retrying", err instanceof Error ? err.message : String(err));
-        scheduleReconnect();
-      }
-    };
-    const scheduleReconnect = (delay = 1_000): void => {
-      debug("watchSession reconnect scheduled", sessionId, delay);
-      clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = undefined;
-        void reconnect();
-      }, delay);
-    };
-
     resetQuietTimer();
-    connectionTimer = setTimeout(() => {
-      const error = new Error("SSE connection timed out");
-      rejectConnection(error);
-      settle("SSE connection setup timed out");
-    }, SSE_CONNECT_TIMEOUT_MS);
-
-    const markConnected = (): void => {
-      if (connected) return;
-      connected = true;
-      clearTimeout(connectionTimer);
-      connectionTimer = undefined;
-      resolveConnection();
-      debug("watchSession connected", sessionId);
-    };
     const processUserMessageState = (messageId: string, text: string, system?: string): boolean => {
       const isRouterPrompt = system?.startsWith("You are being reached over WhatsApp.") === true;
       const state = isRouterPrompt ? undefined : backgroundWorkState(text);
@@ -554,28 +744,17 @@ export class OpencodeClient {
     };
     const isActive = (): boolean => !controller.signal.aborted;
 
-    // event.subscribe() returns a lazy async stream. The current server emits
-    // server.connected as its first event, and the SDK callback fires only
-    // once the actual SSE request has produced an event.
-    const subscribe = async (): Promise<Awaited<ReturnType<SdkClient["event"]["subscribe"]>>> =>
-      this.client.event.subscribe({
-        signal: controller.signal,
-        sseMaxRetryAttempts: 3,
-        onSseEvent: () => {
-          markConnected();
-        },
-        onSseError: (err) => {
-          connectionErrorState.hadError = true;
-          connectionErrorState.attempts += 1;
-          warn("watchSession SSE connect attempt failed, retrying", err instanceof Error ? err.message : String(err));
-        },
-      });
-
+    // The global hub owns the SSE connection and keeps this queue open across
+    // reconnects. Each watcher only processes events for its own session.
     async function consume(stream: AsyncIterable<unknown>): Promise<void> {
       try {
         for await (const event of stream) {
+          /* c8 ignore next -- abort can race a queued event delivery. */
           if (controller.signal.aborted) break;
-          markConnected();
+          if (event === GLOBAL_STREAM_ENDED) {
+            if (!hasTrackedWork()) settle("SSE stream ended");
+            continue;
+          }
           const rawEvent = event as Event | MessagePartDeltaEvent;
           let relevant = false;
 
@@ -717,42 +896,22 @@ export class OpencodeClient {
       } catch (err) {
         if (!controller.signal.aborted) {
           error("watchSession stream error", err instanceof Error ? err.message : String(err));
-        }
-      } finally {
-        rejectConnection(new Error("SSE stream ended before connection"));
-        if (!controller.signal.aborted && connectionErrorState.hadError) {
-          error(
-            "watchSession stream ended after connection retries were exhausted — " +
-              "may not reflect the session actually being done",
-          );
-        }
-        if (!controller.signal.aborted) {
-          if (hasTrackedWork()) {
-            scheduleReconnect(idleCandidateTimer !== undefined ? 0 : undefined);
-          } else {
-            settle("SSE stream ended");
-          }
+          settle("SSE stream error");
         }
       }
+
     }
-
-
-    let subscribeResult: Awaited<ReturnType<SdkClient["event"]["subscribe"]>>;
+    const reconnectDelay = (): number | undefined => {
+      if (!hasTrackedWork()) return undefined;
+      return idleCandidateTimer !== undefined ? 0 : 1_000;
+    };
+    const subscription = this.events.subscribe(sessionId, reconnectDelay);
+    unsubscribeRef.current = subscription.unsubscribe;
+    void consume(subscription.stream);
     try {
-      subscribeResult = await subscribe();
+      await subscription.connected;
     } catch (err) {
-      settle("SSE subscription setup failed");
-      clearTimeout(ceilingTimer);
-      throw err;
-    }
-
-    void consume(subscribeResult.stream);
-
-    try {
-      await connectionPromise;
-    } catch (err) {
-      settle("SSE connection failed");
-      clearTimeout(ceilingTimer);
+      settle(err instanceof Error && err.message === "SSE connection timed out" ? "SSE connection setup timed out" : "SSE subscription setup failed");
       throw err;
     }
     const acquirePrompt = (chatId: string): ((cancel?: boolean, userMessageId?: string) => void) | undefined => {

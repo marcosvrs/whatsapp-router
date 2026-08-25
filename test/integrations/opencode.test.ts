@@ -13,6 +13,8 @@ vi.mock("@opencode-ai/sdk", () => ({ createOpencodeClient }));
 
 const {
   OpencodeClient,
+  createEventQueue,
+  eventSessionId,
   OpencodeSendError,
   IDLE_GRACE_MS,
   MAX_WAIT_MS,
@@ -529,6 +531,32 @@ describe("isMessagePartDeltaEvent", () => {
   });
 });
 
+describe("shared SSE event queue", () => {
+  it("buffers values and closes idempotently", async () => {
+    const queue = createEventQueue<number>();
+    queue.push(1);
+    await expect(queue[Symbol.asyncIterator]().next()).resolves.toEqual({ value: 1, done: false });
+    const pending = queue[Symbol.asyncIterator]().next();
+    queue.close();
+    await expect(pending).resolves.toEqual({ value: undefined, done: true });
+    queue.close();
+    queue.push(2);
+    await expect(queue[Symbol.asyncIterator]().next()).resolves.toEqual({ value: undefined, done: true });
+  });
+});
+describe("eventSessionId", () => {
+  it("extracts direct and nested session identifiers and rejects malformed events", () => {
+    expect(eventSessionId(null)).toBeUndefined();
+    expect(eventSessionId("event")).toBeUndefined();
+    expect(eventSessionId({})).toBeUndefined();
+    expect(eventSessionId({ properties: null })).toBeUndefined();
+    expect(eventSessionId({ properties: { sessionID: "direct" } })).toBe("direct");
+    expect(eventSessionId({ properties: { info: { sessionID: "info" } } })).toBe("info");
+    expect(eventSessionId({ properties: { part: { sessionID: "part" } } })).toBe("part");
+    expect(eventSessionId({ properties: { info: { sessionID: 1 }, part: { sessionID: 2 } } })).toBeUndefined();
+  });
+});
+
 describe("OpencodeClient.watchSession", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -594,6 +622,30 @@ describe("OpencodeClient.watchSession", () => {
     stop();
   });
 
+  it("shares one global subscription while filtering events by session", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const firstMessages = vi.fn();
+    const secondMessages = vi.fn();
+    const opencode = client();
+    const first = await opencode.watchSession("ses_1", firstMessages);
+    const second = await opencode.watchSession("ses_2", secondMessages);
+
+    expect(eventSubscribe).toHaveBeenCalledTimes(1);
+    source.push(textPartUpdated("msg_1", "part_1", "ses_1", "first"));
+    source.push(assistantFinished("msg_1", "ses_1"));
+    source.push(textPartUpdated("msg_2", "part_2", "ses_2", "second"));
+    source.push(assistantFinished("msg_2", "ses_2"));
+
+    await vi.waitFor(() => {
+      expect(firstMessages).toHaveBeenCalledWith("msg_1", "first");
+      expect(secondMessages).toHaveBeenCalledWith("msg_2", "second");
+    });
+    expect(firstMessages).not.toHaveBeenCalledWith("msg_2", "second");
+    expect(secondMessages).not.toHaveBeenCalledWith("msg_1", "first");
+    first.stop();
+    second.stop();
+  });
   it("waits for the actual SSE stream before returning", async () => {
     const source = fakeEventSource();
     connectSource(source, false);
@@ -988,6 +1040,23 @@ describe("OpencodeClient.watchSession", () => {
     expect(eventSubscribe).toHaveBeenCalledTimes(1);
     watch.stop();
   });
+  it("cancels a pending global reconnect when the watcher stops", async () => {
+    const first = fakeEventSource();
+    eventSubscribe.mockImplementationOnce(() => {
+      first.push({ type: "server.connected", properties: {} });
+      return { stream: first.stream };
+    });
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+
+    first.end();
+    await vi.advanceTimersByTimeAsync(0);
+    watch.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(eventSubscribe).toHaveBeenCalledTimes(1);
+  });
 
   it("reconnects when a silent tool keeps the session busy", async () => {
     const first = fakeEventSource();
@@ -1035,6 +1104,12 @@ describe("OpencodeClient.watchSession", () => {
         type: "message.part.delta",
         properties: { sessionID: 1, messageID: "msg_bad", partID: "part", field: "text", delta: "bad" },
       },
+      {
+        type: "message.part.updated",
+        properties: { part: { id: "part", messageID: "msg_bad", type: "text", text: "" } },
+      },
+      { type: "message.updated", properties: { info: { id: "msg_bad", role: "user" } } },
+      { type: "session.idle", properties: {} },
     ];
     for (const event of invalidEvents) source.push(event);
     source.push(partDelta("msg_1", "part_1", "ses_1", "good"));

@@ -50,7 +50,7 @@ describe("WahaClient.sendText", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
 
     const client = new WahaClient("http://waha.test", "key123", "MySession");
-    await expect(client.sendText("111@c.us", "hello")).resolves.toBeUndefined();
+    await expect(client.sendText("111@c.us", "hello")).rejects.toThrow("sendText failed with HTTP 500");
 
     expect(logSpy).toHaveBeenCalledTimes(1);
     const args = logSpy.mock.calls[0] as unknown[];
@@ -72,7 +72,7 @@ describe("WahaClient.sendText", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(badResponse));
 
     const client = new WahaClient("http://waha.test", "key123", "MySession");
-    await client.sendText("111@c.us", "hello");
+    await expect(client.sendText("111@c.us", "hello")).rejects.toThrow("sendText failed with HTTP 500");
 
     const args = logSpy.mock.calls[0] as unknown[];
     expect(args.slice(1)).toEqual(["sendText failed", 500, ""]);
