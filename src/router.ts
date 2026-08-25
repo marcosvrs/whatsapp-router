@@ -83,6 +83,7 @@ export interface RouterDeps {
 // turn twice.
 export interface ActiveAgentExchange {
   readonly sessionId: string;
+  reusable?: boolean;
   readonly isLive?: boolean;
   readonly done: Promise<void>;
   acquirePrompt: (chatId: string) => ((cancel?: boolean) => void) | undefined;
@@ -113,11 +114,11 @@ export class AgentExchangeManager {
     release: (cancel?: boolean) => void;
   }> {
     const current = this.active.get(senderKey);
-    if (current?.sessionId === sessionId) {
+    if (current?.sessionId === sessionId && current.reusable !== false) {
       const release = current.acquirePrompt(chatId);
       if (release) return { exchange: current, created: false, release };
     }
-    current?.stop();
+    if (current?.reusable !== false) current?.stop();
 
     const delivered = new Set<string>();
     const inFlight = new Map<string, PendingDelivery>();
@@ -163,6 +164,7 @@ export class AgentExchangeManager {
     const exchange: ActiveAgentExchange = {
       sessionId,
       isLive: watch.isLive,
+      reusable: true,
       done,
       acquirePrompt: (nextChatId) => watch.acquirePrompt(nextChatId),
       awaitChatIdle: watch.awaitChatIdle,
@@ -304,6 +306,7 @@ async function handleAgent(
   } catch (err) {
     const isAmbiguous = !(err instanceof OpencodeSendError) && exchangeIsLive === true;
     if (isAmbiguous) {
+      exchange.reusable = false;
       warn("opencode call outcome ambiguous; live watcher retained", err instanceof Error ? err.message : String(err));
     } else {
       error("opencode call failed", err instanceof Error ? err.message : String(err));

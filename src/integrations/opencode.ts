@@ -308,6 +308,8 @@ export class OpencodeClient {
     let backgroundWorkPending = false;
     let promptLeases = 0;
     let connected = false;
+    let promptLeaseAcquired = false;
+    let live = true;
     const connectionPromise = new Promise<void>((resolve, reject) => {
       resolveConnection = resolve;
       rejectConnection = reject;
@@ -320,6 +322,7 @@ export class OpencodeClient {
       idleCandidateTimer = undefined;
     };
     const settle = (reason: string): void => {
+      if (!promptLeaseAcquired) live = false;
       if (controller.signal.aborted) return;
       clearTimeout(quietTimer);
       clearTimeout(ceilingTimer);
@@ -342,9 +345,14 @@ export class OpencodeClient {
       resolveIdle();
     };
 
-    const ceilingTimer = setTimeout(() => {
-      settle("hit max wait ceiling");
-    }, MAX_WAIT_MS);
+    let ceilingTimer!: ReturnType<typeof setTimeout>;
+    const resetCeilingTimer = (): void => {
+      clearTimeout(ceilingTimer);
+      ceilingTimer = setTimeout(() => {
+        settle("hit max wait ceiling");
+      }, MAX_WAIT_MS);
+    };
+    resetCeilingTimer();
 
     const resetQuietTimer = (): void => {
       clearTimeout(quietTimer);
@@ -681,7 +689,10 @@ export class OpencodeClient {
                 break;
             }
           }
-          if (relevant) resetQuietTimer();
+          if (relevant) {
+            resetQuietTimer();
+            resetCeilingTimer();
+          }
         }
       } catch (err) {
         if (!controller.signal.aborted) {
@@ -726,6 +737,7 @@ export class OpencodeClient {
     }
     const acquirePrompt = (chatId: string): ((cancel?: boolean) => void) | undefined => {
       if (controller.signal.aborted) return undefined;
+      promptLeaseAcquired = true;
       const pendingPrompt = { chatId, active: true };
       const lifecycle = getChatLifecycle(chatId);
       assistantStreamActivity = false;
@@ -766,7 +778,9 @@ export class OpencodeClient {
     };
 
     return {
-      isLive: true,
+      get isLive(): boolean {
+        return live;
+      },
       awaitIdle: () => idlePromise,
       awaitChatIdle,
       awaitTurn,

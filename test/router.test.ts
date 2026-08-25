@@ -896,6 +896,33 @@ describe("routeMessage — agent context", () => {
     expect(sendNotice).toHaveBeenCalledWith(CHAT_ID, "Agent call failed — check whatsapp-router logs.");
   });
 
+  it("does not reuse an exchange blocked by an ambiguous prompt", async () => {
+    const makeWatch = () => ({
+      isLive: true,
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    });
+    const firstWatch = makeWatch();
+    const secondWatch = makeWatch();
+    const watchSession = vi
+      .spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(firstWatch)
+      .mockResolvedValueOnce(secondWatch);
+    const manager = new AgentExchangeManager();
+    const first = await manager.acquire(deps, "111", "ses_1", "chat1");
+    first.exchange.reusable = false;
+
+    const second = await manager.acquire(deps, "111", "ses_1", "chat2");
+
+    expect(watchSession).toHaveBeenCalledTimes(2);
+    expect(second.exchange).not.toBe(first.exchange);
+    expect(firstWatch.stop).not.toHaveBeenCalled();
+    first.exchange.stop();
+    second.exchange.stop();
+  });
+
 
   it("starts the replacement watcher before a stale-session retry", async () => {
     deps.sessions.set("111", "ses_stale");

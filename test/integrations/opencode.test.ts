@@ -623,6 +623,29 @@ describe("OpencodeClient.watchSession", () => {
     watch.stop();
   });
 
+  it("reports a pre-prompt watcher as non-live when its stream closes", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    source.end();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(watch.isLive).toBe(false);
+    expect(watch.acquirePrompt("chat1")).toBeUndefined();
+  });
+
+  it("keeps a leased watcher live when it settles", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+
+    expect(watch.isLive).toBe(true);
+    release?.();
+    watch.stop();
+    expect(watch.isLive).toBe(true);
+  });
+
 
   it("routes completed turns to the prompt's originating chat", async () => {
     const source = fakeEventSource();
@@ -1642,7 +1665,7 @@ describe("OpencodeClient.watchSession", () => {
     stop();
   });
 
-  it("hits the hard ceiling even with continuous activity", async () => {
+  it("resets the hard ceiling after continuous activity", async () => {
     const source = fakeEventSource();
     connectSource(source);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -1659,12 +1682,31 @@ describe("OpencodeClient.watchSession", () => {
       source.push({ type: "session.status", properties: { sessionID: "ses_1", status: { type: "busy" } } });
     }
     expect(resolved).toBe(false);
-    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS - elapsed + 1);
+    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS + 1);
     expect(resolved).toBe(true);
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "watchSession",
       "hit max wait ceiling",
     ]);
+    stop();
+  });
+
+  it("resets the ceiling from the latest relevant session event", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const { awaitIdle, stop } = await client().watchSession("ses_1", vi.fn());
+    let resolved = false;
+    void awaitIdle().then(() => {
+      resolved = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS - 1);
+    source.push(sessionIdle("ses_1"));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(resolved).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(MAX_WAIT_MS + 1);
+    expect(resolved).toBe(true);
     stop();
   });
 
