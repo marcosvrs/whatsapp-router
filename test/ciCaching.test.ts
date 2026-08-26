@@ -7,12 +7,16 @@ const mutation = readFileSync(new URL("../.github/workflows/mutation-testing.yam
 const image = readFileSync(new URL("../.github/workflows/build-and-push-image.yaml", import.meta.url), "utf8");
 
 describe("CI cache configuration", () => {
-  it("enables Stryker incremental reports and restores the trusted main cache", () => {
+  it("enables Stryker incremental reports and uses rotating commit-keyed caches", () => {
     expect(stryker).toContain("incremental: true");
     expect(stryker).toContain('incrementalFile: "reports/stryker-incremental.json"');
     expect(fastPush).toContain("reports/stryker-incremental.json");
+    expect(fastPush).toContain("${{ github.sha }}");
+    expect(fastPush).toContain("restore-keys:");
     expect(mutation).toContain("actions/cache/restore@");
     expect(mutation).toContain("actions/cache/save@");
+    expect(mutation).toContain("${{ github.sha }}");
+    expect(mutation).toContain("restore-keys:");
   });
 
   it("uses a persistent BuildKit layer cache for image publishing", () => {

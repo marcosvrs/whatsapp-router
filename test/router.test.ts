@@ -824,6 +824,11 @@ describe("routeMessage — agent context", () => {
     acquired.exchange.deliver("msg_1", "reply", "chat1");
     acquired.exchange.deliver("msg_1", "reply", "chat1");
     await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    await Promise.resolve();
+    expect(send).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(2);
       expect(send).toHaveBeenNthCalledWith(1, "chat1", "reply", "msg_1", expect.any(AbortSignal));
       expect(send).toHaveBeenNthCalledWith(2, "chat1", "reply", "msg_1", expect.any(AbortSignal));
@@ -954,6 +959,64 @@ describe("routeMessage — agent context", () => {
     acquired.exchange.stop();
   });
 
+  it("cancels a delayed delivery retry when its exchange stops", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const send = vi.spyOn(deps.typing, "send").mockRejectedValueOnce(new Error("temporary WAHA failure"));
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("delayed-cancel", "reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    await vi.waitFor(() => {
+      expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+        "failed to deliver agent turn",
+        "temporary WAHA failure",
+      ]);
+    });
+    manager.stop("111", acquired.exchange);
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("cancels a delayed startup retry when its sender stops", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const send = vi.spyOn(deps.typing, "send").mockRejectedValueOnce(new Error("temporary WAHA failure"));
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "startup-delayed-cancel",
+      text: "startup reply",
+      chatId: "chat1",
+      attempts: 0,
+    });
+    const manager = new AgentExchangeManager();
+
+    manager.drainPersistedDeliveries(deps);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    await vi.waitFor(() => {
+      expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+        "failed to replay agent turn",
+        "temporary WAHA failure",
+      ]);
+    });
+    manager.stop("111");
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("cancels an in-flight delivery when its exchange stops", async () => {
     const send = vi.spyOn(deps.typing, "send").mockImplementation(
       (_chatId, _text, _messageId, signal) =>
@@ -1011,6 +1074,28 @@ describe("routeMessage — agent context", () => {
     });
     expect(send.mock.calls.map((call) => call[2])).toEqual(["startup-message", "startup-message"]);
     expect(deps.deliveryRetries.list("111")).toEqual([]);
+  });
+
+  it("cancels a delayed startup retry when its sender stops", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockRejectedValueOnce(new Error("temporary WAHA failure"));
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "startup-delayed-cancel",
+      text: "startup reply",
+      chatId: "chat1",
+      attempts: 0,
+    });
+    const manager = new AgentExchangeManager();
+
+    manager.drainPersistedDeliveries(deps);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    manager.stop("111");
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it("continues later delivery work after an unexpected queue rejection", async () => {
@@ -1258,10 +1343,12 @@ describe("routeMessage — agent context", () => {
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(2);
     });
-    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
-      "agent turn delivery retries exhausted",
-      "msg_1",
-    ]);
+    await vi.waitFor(() => {
+      expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+        "agent turn delivery retries exhausted",
+        "msg_1",
+      ]);
+    });
     manager.stop("111", acquired.exchange);
   });
   it("drops deliveries from an exchange invalidated by /new", async () => {

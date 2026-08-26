@@ -435,7 +435,9 @@ describe("server message handling", () => {
     const body = messageBody({ body: "/new" });
     await postWebhook(body, { "X-Webhook-Hmac": sign(body) });
 
-    expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "Started a new conversation." }]);
+    await vi.waitFor(() => {
+      expect(sentMessages).toEqual([{ chatId: "111@c.us", text: "Started a new conversation." }]);
+    });
     expect(deps.waha.editMessage).not.toHaveBeenCalled();
     expect(deps.waha.sendReaction).not.toHaveBeenCalled();
   });

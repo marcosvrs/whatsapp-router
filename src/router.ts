@@ -104,7 +104,14 @@ interface PendingDelivery {
   fallback?: PendingDelivery;
 }
 const MAX_DELIVERY_ATTEMPTS = 2;
+const DELIVERY_RETRY_DELAY_MS = 250;
 
+function waitForDeliveryRetry(): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, DELIVERY_RETRY_DELAY_MS);
+  });
+
+}
 export class AgentExchangeManager {
   private readonly active = new Map<string, ActiveAgentExchange>();
   private readonly generations = new Map<string, number>();
@@ -226,6 +233,12 @@ export class AgentExchangeManager {
               return;
             }
             error("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
+            await waitForDeliveryRetry();
+            if (isCanceled()) {
+              deps.deliveryRetries.delete(senderKey, messageId);
+              cleanup();
+              return;
+            }
             const fallback: PendingDelivery = current.fallback ?? current;
             current = { ...fallback, attempts: current.attempts + 1 };
             inFlight.set(messageId, current);
@@ -316,6 +329,11 @@ export class AgentExchangeManager {
                 return;
               }
               error("failed to replay agent turn", err instanceof Error ? err.message : String(err));
+              await waitForDeliveryRetry();
+              if (isCanceled()) {
+                deps.deliveryRetries.delete(entry.senderKey, entry.messageId);
+                return;
+              }
               current = { ...current, attempts: current.attempts + 1 };
               deps.deliveryRetries.set(current);
               warn("retrying persisted agent turn delivery", entry.messageId);
