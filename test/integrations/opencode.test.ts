@@ -2093,6 +2093,25 @@ describe("OpencodeClient.watchSession", () => {
 
     expect(onMessage).not.toHaveBeenCalled();
   });
+  it("retries empty recovery before discarding a completed turn", async () => {
+    sessionMessage
+      .mockResolvedValueOnce({ data: undefined, error: new Error("not ready"), response: { status: 404 } })
+      .mockResolvedValueOnce(
+        ok({ info: { id: "msg_1", sessionID: "ses_1", role: "assistant" }, parts: [{ type: "text", text: "retried" }] }),
+      );
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const { stop } = await client().watchSession("ses_1", onMessage);
+    source.push(assistantFinished("msg_1", "ses_1"));
+
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("msg_1", "retried");
+    });
+    expect(sessionMessage).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
   it("does not deliver when message recovery returns no data", async () => {
     sessionMessage.mockResolvedValue({ data: undefined, error: new Error("not found"), response: { status: 404 } });
     const source = fakeEventSource();

@@ -1132,6 +1132,39 @@ describe("routeMessage — agent context", () => {
     });
     second.exchange.stop();
   });
+  it("preserves completed delivery work across stale session replacement", async () => {
+    let release!: () => void;
+    const send = vi.spyOn(deps.typing, "send").mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const makeWatch = () => ({
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    });
+    vi.spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(makeWatch())
+      .mockResolvedValueOnce(makeWatch());
+    const manager = new AgentExchangeManager();
+    const first = await manager.acquire(deps, "111", "ses_old", "chat1");
+    first.exchange.deliver("before-replacement", "old reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    const replacement = await manager.acquire(deps, "111", "ses_new", "chat1");
+    expect(send).toHaveBeenCalledTimes(1);
+    release();
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    replacement.exchange.stop();
+  });
+
 
   it("removes an exhausted persisted delivery during startup drain", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);

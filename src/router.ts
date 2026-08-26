@@ -94,7 +94,7 @@ export interface ActiveAgentExchange {
   awaitTurn?: (messageId: string) => Promise<void>;
   markPromptCompleted: (chatId?: string, mayHaveBackgroundWork?: boolean) => void;
   deliver: (messageId: string, text: string, chatId: string) => void;
-  stop: () => void;
+  stop: (cancelDeliveries?: boolean) => void;
 }
 
 interface PendingDelivery {
@@ -161,7 +161,7 @@ export class AgentExchangeManager {
       const release = current.acquirePrompt(chatId);
       if (release) return { exchange: current, created: false, release };
     }
-    current?.stop();
+    current?.stop(false);
 
     const delivered = new Set<string>();
     const inFlight = new Map<string, PendingDelivery>();
@@ -271,8 +271,10 @@ export class AgentExchangeManager {
       deliver: (messageId, text, destinationChatId) => {
         enqueueDelivery(messageId, text, destinationChatId);
       },
-      stop: () => {
-        for (const controller of exchangeControllers) controller.abort();
+      stop: (cancelDeliveries = true) => {
+        if (cancelDeliveries) {
+          for (const controller of exchangeControllers) controller.abort();
+        }
         watch.stop();
         if (this.active.get(senderKey) === exchange) this.active.delete(senderKey);
       },
@@ -329,11 +331,11 @@ export class AgentExchangeManager {
     }
   }
 
-  stop(senderKey: string, expected?: ActiveAgentExchange): void {
+  stop(senderKey: string, expected?: ActiveAgentExchange, cancelDeliveries = true): void {
     const current = this.active.get(senderKey);
     if (expected && current !== expected) return;
-    current?.stop();
-    this.abortDeliveries(senderKey);
+    current?.stop(cancelDeliveries);
+    if (cancelDeliveries) this.abortDeliveries(senderKey);
   }
 
   currentGeneration(senderKey: string): number {
@@ -436,8 +438,8 @@ async function handleAgent(
 
         const replaceExchange = async (nextSessionId: string): Promise<void> => {
           releasePrompt(true);
+          deps.exchanges.stop(senderKey, exchange, false);
           promptReleased = true;
-          deps.exchanges.stop(senderKey, exchange);
           deps.sessions.set(senderKey, nextSessionId);
           const replacement = await deps.exchanges.acquire(deps, senderKey, nextSessionId, chatId);
           exchange = replacement.exchange;

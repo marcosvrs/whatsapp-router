@@ -783,15 +783,18 @@ export class OpencodeClient {
 
 
     const recoverMessageText = async (messageId: string): Promise<string> => {
-      try {
-        const result = await this.client.session.message({
-          path: { id: sessionId, messageID: messageId },
-        });
-        return result.data ? extractReplyText(result.data.parts) : "";
-      } catch (err) {
-        warn("watchSession message recovery failed", err instanceof Error ? err.message : String(err));
-        return "";
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const result = await this.client.session.message({
+            path: { id: sessionId, messageID: messageId },
+          });
+          const text = result.data ? extractReplyText(result.data.parts) : "";
+          if (text) return text;
+        } catch (err) {
+          warn("watchSession message recovery failed", err instanceof Error ? err.message : String(err));
+        }
       }
+      return "";
     };
     const isActive = (): boolean => !controller.signal.aborted;
 
