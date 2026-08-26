@@ -970,8 +970,7 @@ describe("OpencodeClient.watchSession", () => {
     source.push(textPartUpdated("ambiguous_assistant", "part_ambiguous_reply", "ses_1", "ambiguous result"));
     source.push(assistantFinished("ambiguous_assistant", "ses_1", "stop", "ambiguous_complete"));
     await vi.advanceTimersByTimeAsync(0);
-    expect(onMessage).not.toHaveBeenCalledWith("ambiguous_assistant", "ambiguous result", "chat1");
-    expect(onMessage).not.toHaveBeenCalledWith("ambiguous_assistant", "ambiguous result", "chat2");
+    expect(onMessage).toHaveBeenCalledWith("ambiguous_assistant", "ambiguous result", "chat3");
     source.push({
       type: "message.updated",
       properties: { info: { id: "complete_2", sessionID: "ses_1", role: "user", parentID: "marker_2" } },
