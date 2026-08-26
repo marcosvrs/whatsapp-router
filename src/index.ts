@@ -17,28 +17,33 @@ const config = loadConfig();
 const waha = new WahaClient(config.wahaBaseUrl, config.wahaApiKey, config.wahaSession);
 const identity = new Identity(waha);
 
+const exchanges = new AgentExchangeManager();
+const deliveryRetries = new DeliveryRetryStore(`${config.sessionsFile}.delivery-retries.json`);
+const router = {
+  opencode: new OpencodeClient({
+    baseUrl: config.opencodeBaseUrl,
+    authHeader: config.opencodeAuthHeader,
+    modelProvider: config.opencodeModelProvider,
+    modelId: config.opencodeModelId,
+  }),
+  sessions: new SessionStore(config.sessionsFile),
+  deliveryRetries,
+  senderLock: new SenderLock(),
+  typing: new TypingPresence(waha),
+  exchanges,
+};
+
 const deps: ServerDeps = {
   waha,
   identity,
   rateLimiter: new RateLimiter(config.rateLimitMax, config.rateLimitWindowMs),
   dedupe: new MessageDedupe(5 * 60 * 1000),
-  router: {
-    opencode: new OpencodeClient({
-      baseUrl: config.opencodeBaseUrl,
-      authHeader: config.opencodeAuthHeader,
-      modelProvider: config.opencodeModelProvider,
-      modelId: config.opencodeModelId,
-    }),
-    sessions: new SessionStore(config.sessionsFile),
-    deliveryRetries: new DeliveryRetryStore(`${config.sessionsFile}.delivery-retries.json`),
-    senderLock: new SenderLock(),
-    typing: new TypingPresence(waha),
-    exchanges: new AgentExchangeManager(),
-  },
+  router,
 };
 
 const server = buildServer(config, deps);
 server.listen(config.port, () => {
   info(`whatsapp-router listening on :${String(config.port)}`);
 });
+exchanges.drainPersistedDeliveries(router);
 void identity.ensureLidMap();

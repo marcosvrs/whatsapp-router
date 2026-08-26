@@ -825,15 +825,354 @@ describe("routeMessage — agent context", () => {
     acquired.exchange.deliver("msg_1", "reply", "chat1");
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(2);
-      expect(send).toHaveBeenNthCalledWith(1, "chat1", "reply", "msg_1");
-      expect(send).toHaveBeenNthCalledWith(2, "chat1", "reply", "msg_1");
+      expect(send).toHaveBeenNthCalledWith(1, "chat1", "reply", "msg_1", expect.any(AbortSignal));
+      expect(send).toHaveBeenNthCalledWith(2, "chat1", "reply", "msg_1", expect.any(AbortSignal));
     });
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    const tails = (manager as unknown as { deliveryTails: Map<string, Promise<void>> }).deliveryTails;
+    expect(tails.has("chat1")).toBe(false);
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "failed to deliver agent turn",
       "temporary WAHA failure",
     ]);
     manager.stop("111", acquired.exchange);
   });
+
+  it("keeps a failed turn ahead of later queued turns", async () => {
+    const send = vi
+      .spyOn(deps.typing, "send")
+      .mockRejectedValueOnce(new Error("temporary WAHA failure"))
+      .mockResolvedValue(undefined);
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("first", "first reply", "chat1");
+    acquired.exchange.deliver("second", "second reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(3);
+    });
+
+    expect(send.mock.calls.map((call) => call[2])).toEqual(["first", "first", "second"]);
+    manager.stop("111", acquired.exchange);
+  });
+
+  it("persists a pending fallback while the first delivery is in flight", async () => {
+    let releaseFirst!: () => void;
+    const send = vi.spyOn(deps.typing, "send").mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        }),
+    );
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("fallback", "first reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    expect(deps.deliveryRetries.list("111")).toEqual([
+      {
+        senderKey: "111",
+        messageId: "fallback",
+        text: "first reply",
+        chatId: "chat1",
+        attempts: 0,
+      },
+    ]);
+    acquired.exchange.deliver("fallback", "authoritative reply", "chat1");
+    expect(deps.deliveryRetries.list("111")).toEqual([
+      {
+        senderKey: "111",
+        messageId: "fallback",
+        text: "authoritative reply",
+        chatId: "chat1",
+        attempts: 0,
+      },
+    ]);
+    releaseFirst();
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    acquired.exchange.stop();
+  });
+
+  it("persists retry attempts before retrying a failed delivery", async () => {
+    let releaseRetry!: () => void;
+    const send = vi
+      .spyOn(deps.typing, "send")
+      .mockRejectedValueOnce(new Error("temporary WAHA failure"))
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseRetry = resolve;
+          }),
+      );
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("retry-state", "reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+    expect(deps.deliveryRetries.list("111")).toEqual([
+      {
+        senderKey: "111",
+        messageId: "retry-state",
+        text: "reply",
+        chatId: "chat1",
+        attempts: 1,
+      },
+    ]);
+    releaseRetry();
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    acquired.exchange.stop();
+  });
+
+  it("cancels an in-flight delivery when its exchange stops", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockImplementation(
+      (_chatId, _text, _messageId, signal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+    );
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("in-flight", "old reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    manager.stop("111", acquired.exchange);
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    const controllers = manager as unknown as {
+      deliveryControllers: Map<string, Set<AbortController>>;
+    };
+    expect(controllers.deliveryControllers.size).toBe(0);
+  });
+  it("drains persisted deliveries without waiting for a new prompt", async () => {
+    const send = vi
+      .spyOn(deps.typing, "send")
+      .mockRejectedValueOnce(new Error("temporary WAHA failure"))
+      .mockResolvedValue(undefined);
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "startup-message",
+      text: "startup reply",
+      chatId: "chat1",
+      attempts: 0,
+    });
+    const manager = new AgentExchangeManager();
+
+    manager.drainPersistedDeliveries(deps);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+    expect(send.mock.calls.map((call) => call[2])).toEqual(["startup-message", "startup-message"]);
+    expect(deps.deliveryRetries.list("111")).toEqual([]);
+  });
+
+  it("continues later delivery work after an unexpected queue rejection", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const manager = new AgentExchangeManager();
+    const queue = manager as unknown as {
+      queueDelivery: (chatId: string, task: () => Promise<void>) => void;
+    };
+
+    queue.queueDelivery("chat1", () => Promise.reject(new Error("queue failure")));
+    queue.queueDelivery("chat1", () => Promise.resolve());
+    queue.queueDelivery("chat2", () => Promise.reject(new Error("final queue failure")));
+    const internals = manager as unknown as {
+      deliveryTails: Map<string, Promise<void>>;
+    };
+    const chat1Tail = (internals.deliveryTails.get("chat1") ?? Promise.resolve()).catch(() => undefined);
+    const chat2Tail = (internals.deliveryTails.get("chat2") ?? Promise.resolve()).catch(() => undefined);
+    await Promise.all([chat1Tail, chat2Tail]);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "delivery queue failed",
+      "queue failure",
+    ]);
+    expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+      "delivery queue failed",
+      "final queue failure",
+    ]);
+    expect(internals.deliveryTails.has("chat1")).toBe(false);
+    expect(internals.deliveryTails.has("chat2")).toBe(false);
+  });
+
+  it("drops a queued delivery when its exchange is stopped before dispatch", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    acquired.exchange.deliver("queued", "old reply", "chat1");
+    manager.stop("111", acquired.exchange);
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("does not duplicate a delivery already queued for startup drain", async () => {
+    let release!: () => void;
+    const send = vi.spyOn(deps.typing, "send").mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "startup-once",
+      text: "startup reply",
+      chatId: "chat1",
+      attempts: 0,
+    });
+    const manager = new AgentExchangeManager();
+
+    manager.drainPersistedDeliveries(deps);
+    manager.drainPersistedDeliveries(deps);
+    const acquired = await manager.acquire(deps, "111", "ses_1", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(deps.deliveryRetries.list("111")).toHaveLength(1);
+    });
+    release();
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    acquired.exchange.stop();
+  });
+
+  it("removes an exhausted persisted delivery during startup drain", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const send = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "startup-exhausted",
+      text: "startup reply",
+      chatId: "chat1",
+      attempts: 2,
+    });
+    const manager = new AgentExchangeManager();
+
+    manager.drainPersistedDeliveries(deps);
+    await vi.waitFor(() => {
+      expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
+        "agent turn delivery retries exhausted",
+        "startup-exhausted",
+      ]);
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(deps.deliveryRetries.list("111")).toEqual([]);
+  });
+
+  it("cancels an in-flight startup delivery when its sender stops", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockImplementation(
+      (_chatId, _text, _messageId, signal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+    );
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "startup-in-flight",
+      text: "startup reply",
+      chatId: "chat1",
+      attempts: 0,
+    });
+    const manager = new AgentExchangeManager();
+
+    manager.drainPersistedDeliveries(deps);
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    manager.stop("111");
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    expect((manager as unknown as { deliveryControllers: Map<string, Set<AbortController>> }).deliveryControllers.size).toBe(0);
+  });
+  it("clears a startup delivery canceled before dispatch", async () => {
+    const send = vi.spyOn(deps.typing, "send").mockResolvedValue(undefined);
+    deps.deliveryRetries.set({
+      senderKey: "111",
+      messageId: "startup-canceled",
+      text: "startup reply",
+      chatId: "chat1",
+      attempts: 0,
+    });
+    const manager = new AgentExchangeManager();
+
+    manager.drainPersistedDeliveries(deps);
+    manager.stop("111");
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
 
   it("bounds delivery retries when no fallback turn exists", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -1089,8 +1428,8 @@ describe("routeMessage — agent context", () => {
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(2);
     });
-    expect(send).toHaveBeenNthCalledWith(1, CHAT_ID, "reply", "msg_3");
-    expect(send).toHaveBeenNthCalledWith(2, CHAT_ID, "reply", "msg_3");
+    expect(send).toHaveBeenNthCalledWith(1, CHAT_ID, "reply", "msg_3", expect.any(AbortSignal));
+    expect(send).toHaveBeenNthCalledWith(2, CHAT_ID, "reply", "msg_3", expect.any(AbortSignal));
     manager.stop("111", acquired.exchange);
   });
   it("deduplicates a delivered message after the first send succeeds", async () => {
@@ -1109,6 +1448,7 @@ describe("routeMessage — agent context", () => {
     acquired.exchange.deliver("msg_1", "reply", CHAT_ID);
     await vi.waitFor(() => {
       expect(send).toHaveBeenCalledTimes(1);
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
     });
     acquired.exchange.deliver("msg_1", "reply", CHAT_ID);
     await Promise.resolve();

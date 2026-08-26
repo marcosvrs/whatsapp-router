@@ -10,6 +10,7 @@ export const PRESENCE_REQUEST_TIMEOUT_MS = 10_000;
 function boundedPresenceRequest(
   action: string,
   request: (signal: AbortSignal) => Promise<void>,
+  parentSignal?: AbortSignal,
 ): Promise<void> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
@@ -19,7 +20,8 @@ function boundedPresenceRequest(
       reject(new Error(`${action} timed out`));
     }, PRESENCE_REQUEST_TIMEOUT_MS);
   });
-  return Promise.race([Promise.resolve().then(() => request(controller.signal)), timeout]).finally(() => {
+  const signal = parentSignal ? AbortSignal.any([controller.signal, parentSignal]) : controller.signal;
+  return Promise.race([Promise.resolve().then(() => request(signal)), timeout]).finally(() => {
     clearTimeout(timer);
   });
 }
@@ -67,28 +69,39 @@ export class TypingPresence {
       });
   }
 
-  send(chatId: string, text: string, id?: string): Promise<void> {
+  send(chatId: string, text: string, id?: string, parentSignal?: AbortSignal): Promise<void> {
     return this.perChat.run(chatId, async () => {
       debug("sending WhatsApp reply", chatId, id ?? "without-id");
       this.pauseInterval(chatId);
       // Presence cleanup is best-effort. A transient WAHA failure must never
       // suppress the actual reply, and the message id may already be marked
       // delivered by the caller's dedupe set.
-      await boundedPresenceRequest("stopTyping", (signal) => this.waha.stopTyping(chatId, signal)).catch(
-        (err: unknown) => {
-          warn("stopTyping failed", err instanceof Error ? err.message : String(err));
-        },
-      );
+      await boundedPresenceRequest(
+        "stopTyping",
+        (signal) => this.waha.stopTyping(chatId, signal),
+        parentSignal,
+      ).catch((err: unknown) => {
+        warn("stopTyping failed", err instanceof Error ? err.message : String(err));
+      });
       try {
-      if (this.waha.sendTextWithSignal) {
-        await boundedPresenceRequest("sendText", (signal) =>
-          this.waha.sendTextWithSignal?.(chatId, text, id, signal) ?? Promise.resolve(),
-        );
-      } else {
-        await boundedPresenceRequest("sendText", () => (id ? this.waha.sendText(chatId, text, id) : this.waha.sendText(chatId, text)));
-      }
+        if (this.waha.sendTextWithSignal) {
+          await boundedPresenceRequest(
+            "sendText",
+            (signal) => this.waha.sendTextWithSignal?.(chatId, text, id, signal) ?? Promise.resolve(),
+            parentSignal,
+          );
+        } else {
+          await boundedPresenceRequest(
+            "sendText",
+            (signal) =>
+              id
+                ? this.waha.sendText(chatId, text, id, signal)
+                : this.waha.sendText(chatId, text, undefined, signal),
+            parentSignal,
+          );
+        }
       } finally {
-        if ((this.activeCount.get(chatId) ?? 0) > 0) {
+        if (!parentSignal?.aborted && (this.activeCount.get(chatId) ?? 0) > 0) {
           await boundedPresenceRequest("startTyping", (signal) => this.waha.startTyping(chatId, signal)).catch(
             logStartTypingFailure,
           );

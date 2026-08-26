@@ -42,6 +42,10 @@ export class DeliveryRetryStore {
     return [...this.entries.values()].filter((entry) => entry.senderKey === senderKey);
   }
 
+  listAll(): DeliveryRetryEntry[] {
+    return [...this.entries.values()];
+  }
+
   set(entry: DeliveryRetryEntry): void {
     this.entries.set(this.key(entry.senderKey, entry.messageId), entry);
     this.save();

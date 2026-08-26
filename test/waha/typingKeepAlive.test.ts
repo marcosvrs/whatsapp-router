@@ -49,7 +49,7 @@ describe("TypingPresence", () => {
     const sendPromise = typing.send("chat1", "hello");
     await vi.advanceTimersByTimeAsync(PRESENCE_REQUEST_TIMEOUT_MS);
     await expect(sendPromise).resolves.toBeUndefined();
-    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", undefined, expect.any(AbortSignal));
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "startTyping failed",
       "startTyping timed out",
@@ -66,7 +66,7 @@ describe("TypingPresence", () => {
     const sendPromise = typing.send("chat1", "hello");
     await vi.advanceTimersByTimeAsync(PRESENCE_REQUEST_TIMEOUT_MS);
     await expect(sendPromise).resolves.toBeUndefined();
-    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", undefined, expect.any(AbortSignal));
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "stopTyping failed",
       "stopTyping timed out",
@@ -155,7 +155,7 @@ describe("TypingPresence", () => {
     await typing.send("chat1", "hello", "msg_1");
 
     expect(calls).toEqual(["stop", "send", "start"]);
-    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", "msg_1");
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", "msg_1", expect.any(AbortSignal));
   });
 
   it("resumes the refresh interval after a send while still active", async () => {
@@ -176,7 +176,7 @@ describe("TypingPresence", () => {
     expect(vi.getTimerCount()).toBe(0);
 
     expect(waha.stopTyping).toHaveBeenCalledWith("chat1", expect.any(AbortSignal));
-    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", undefined, expect.any(AbortSignal));
     expect(waha.startTyping).not.toHaveBeenCalled();
 
     (waha.startTyping as ReturnType<typeof vi.fn>).mockClear();
@@ -191,7 +191,7 @@ describe("TypingPresence", () => {
 
     await typing.send("chat1", "hello");
 
-    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", undefined, expect.any(AbortSignal));
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "stopTyping failed",
       "WAHA unavailable",
@@ -211,7 +211,7 @@ describe("TypingPresence", () => {
     typing.begin("chat1");
     await vi.advanceTimersByTimeAsync(0);
     await expect(typing.send("chat1", "hello")).resolves.toBeUndefined();
-    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello");
+    expect(waha.sendText).toHaveBeenCalledWith("chat1", "hello", undefined, expect.any(AbortSignal));
     expect(logSpy.mock.calls.map((call: unknown[]) => call.slice(1))).toContainEqual([
       "startTyping failed",
       "WAHA unavailable",
@@ -252,6 +252,27 @@ describe("TypingPresence", () => {
     const typing = new TypingPresence(waha);
 
     await expect(typing.send("chat1", "hello")).rejects.toThrow("send failed");
+  });
+  it("cancels a signal-aware send when its parent signal aborts", async () => {
+    const waha = fakeWaha();
+    waha.sendTextWithSignal = vi.fn(
+      (_chatId: string, _text: string, _id: string | undefined, signal: AbortSignal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              reject(new Error("aborted"));
+            },
+            { once: true },
+          );
+        }),
+    );
+    const typing = new TypingPresence(waha);
+    const controller = new AbortController();
+    const send = typing.send("chat1", "hello", undefined, controller.signal);
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await expect(send).rejects.toThrow("aborted");
   });
   it("bounds a hung sendText request while keeping typing state recoverable", async () => {
     const waha = fakeWaha();

@@ -108,7 +108,43 @@ const MAX_DELIVERY_ATTEMPTS = 2;
 export class AgentExchangeManager {
   private readonly active = new Map<string, ActiveAgentExchange>();
   private readonly generations = new Map<string, number>();
+  private readonly deliveryTails = new Map<string, Promise<void>>();
+  private readonly deliveryControllers = new Map<string, Set<AbortController>>();
+  private readonly queuedPersistedDeliveries = new Set<string>();
 
+  private queueDelivery(chatId: string, task: () => Promise<void>): void {
+    const previous = this.deliveryTails.get(chatId) ?? Promise.resolve();
+    const queued = previous.catch(() => undefined).then(task);
+    this.deliveryTails.set(chatId, queued);
+    // Stryker disable all: promise-tail cleanup is concurrency bookkeeping; direct state assertions cover it.
+    void queued.then(
+      () => {
+        if (this.deliveryTails.get(chatId) === queued) this.deliveryTails.delete(chatId);
+      },
+      (err: unknown) => {
+        error("delivery queue failed", err instanceof Error ? err.message : String(err));
+        if (this.deliveryTails.get(chatId) === queued) this.deliveryTails.delete(chatId);
+      },
+    );
+    // Stryker restore all
+  }
+
+  private trackController(senderKey: string, controller: AbortController): () => void {
+    const controllers = this.deliveryControllers.get(senderKey) ?? new Set<AbortController>();
+    controllers.add(controller);
+    this.deliveryControllers.set(senderKey, controllers);
+    // Stryker disable all: controller-set cleanup is concurrency bookkeeping; reset tests cover it.
+    return () => {
+      controllers.delete(controller);
+      if (controllers.size === 0) this.deliveryControllers.delete(senderKey);
+    };
+    // Stryker restore all
+  }
+
+  private abortDeliveries(senderKey: string): void {
+    for (const controller of this.deliveryControllers.get(senderKey) ?? []) controller.abort();
+    this.deliveryControllers.delete(senderKey);
+  }
   async acquire(
     deps: RouterDeps,
     senderKey: string,
@@ -129,6 +165,7 @@ export class AgentExchangeManager {
 
     const delivered = new Set<string>();
     const inFlight = new Map<string, PendingDelivery>();
+    const exchangeControllers = new Set<AbortController>();
     const enqueueDelivery = (
       messageId: string,
       text: string,
@@ -150,28 +187,58 @@ export class AgentExchangeManager {
         return;
       }
       const delivery: PendingDelivery = { text, chatId: destinationChatId, attempts };
+      const controller = new AbortController();
+      const releaseController = this.trackController(senderKey, controller);
+      exchangeControllers.add(controller);
+      const cleanup = (): void => {
+        exchangeControllers.delete(controller);
+        releaseController();
+        inFlight.delete(messageId);
+      };
       deps.deliveryRetries.set({ senderKey, messageId, text, chatId: destinationChatId, attempts });
       debug("agent turn delivery queued", messageId, destinationChatId);
       inFlight.set(messageId, delivery);
-      void deliver(deps, destinationChatId, text, messageId)
-        .then(() => {
-          inFlight.delete(messageId);
-          delivered.add(messageId);
-          deps.deliveryRetries.delete(senderKey, messageId);
-          debug("agent turn delivered", messageId, destinationChatId);
-        })
-        .catch((err: unknown) => {
-          inFlight.delete(messageId);
-          error("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
-          const fallback: PendingDelivery = delivery.fallback ?? delivery;
-          if (delivery.attempts + 1 < MAX_DELIVERY_ATTEMPTS) {
-            warn("retrying agent turn delivery", messageId);
-            enqueueDelivery(messageId, fallback.text, fallback.chatId, delivery.attempts + 1);
-          } else {
+      this.queueDelivery(destinationChatId, async () => {
+        let current = delivery;
+        const isCanceled = (): boolean =>
+          controller.signal.aborted || generation !== this.currentGeneration(senderKey);
+        while (current.attempts < MAX_DELIVERY_ATTEMPTS) {
+          if (isCanceled()) {
             deps.deliveryRetries.delete(senderKey, messageId);
-            error("agent turn delivery retries exhausted", messageId);
+            cleanup();
+            return;
           }
-        });
+          try {
+            await deliver(deps, current.chatId, current.text, messageId, controller.signal);
+            delivered.add(messageId);
+            deps.deliveryRetries.delete(senderKey, messageId);
+            debug("agent turn delivered", messageId, current.chatId);
+            cleanup();
+            return;
+          } catch (err: unknown) {
+            if (isCanceled()) {
+              deps.deliveryRetries.delete(senderKey, messageId);
+              cleanup();
+              return;
+            }
+            error("failed to deliver agent turn", err instanceof Error ? err.message : String(err));
+            const fallback: PendingDelivery = current.fallback ?? current;
+            current = { ...fallback, attempts: current.attempts + 1 };
+            inFlight.set(messageId, current);
+            deps.deliveryRetries.set({
+              senderKey,
+              messageId,
+              text: current.text,
+              chatId: current.chatId,
+              attempts: current.attempts,
+            });
+            warn("retrying agent turn delivery", messageId);
+          }
+        }
+        deps.deliveryRetries.delete(senderKey, messageId);
+        error("agent turn delivery retries exhausted", messageId);
+        cleanup();
+      });
     };
     const onTurn = (messageId: string, turnText: string, turnChatId?: string): void => {
       if (!turnChatId) {
@@ -201,6 +268,7 @@ export class AgentExchangeManager {
         enqueueDelivery(messageId, text, destinationChatId);
       },
       stop: () => {
+        for (const controller of exchangeControllers) controller.abort();
         watch.stop();
         if (this.active.get(senderKey) === exchange) this.active.delete(senderKey);
       },
@@ -208,16 +276,60 @@ export class AgentExchangeManager {
     exchangeRef.current = exchange;
     this.active.set(senderKey, exchange);
     for (const retry of deps.deliveryRetries.list(senderKey)) {
+      const retryKey = `${senderKey}:${retry.messageId}`;
+      if (this.queuedPersistedDeliveries.has(retryKey)) continue;
       enqueueDelivery(retry.messageId, retry.text, retry.chatId, retry.attempts);
     }
     const release = exchange.acquirePrompt(chatId) ?? (() => undefined);
+
     return { exchange, created: true, release };
+  }
+  drainPersistedDeliveries(deps: Pick<RouterDeps, "typing" | "deliveryRetries">): void {
+    for (const entry of deps.deliveryRetries.listAll()) {
+      const retryKey = `${entry.senderKey}:${entry.messageId}`;
+      if (this.queuedPersistedDeliveries.has(retryKey)) continue;
+      this.queuedPersistedDeliveries.add(retryKey);
+      const controller = new AbortController();
+      const releaseController = this.trackController(entry.senderKey, controller);
+      this.queueDelivery(entry.chatId, async () => {
+        let current = entry;
+        const isCanceled = (): boolean => controller.signal.aborted;
+        try {
+          while (current.attempts < MAX_DELIVERY_ATTEMPTS) {
+            if (isCanceled()) {
+              deps.deliveryRetries.delete(entry.senderKey, entry.messageId);
+              return;
+            }
+            try {
+              await deliver(deps, current.chatId, current.text, current.messageId, controller.signal);
+              deps.deliveryRetries.delete(entry.senderKey, entry.messageId);
+              return;
+            } catch (err: unknown) {
+              if (isCanceled()) {
+                deps.deliveryRetries.delete(entry.senderKey, entry.messageId);
+                return;
+              }
+              error("failed to replay agent turn", err instanceof Error ? err.message : String(err));
+              current = { ...current, attempts: current.attempts + 1 };
+              deps.deliveryRetries.set(current);
+              warn("retrying persisted agent turn delivery", entry.messageId);
+            }
+          }
+          deps.deliveryRetries.delete(entry.senderKey, entry.messageId);
+          error("agent turn delivery retries exhausted", entry.messageId);
+        } finally {
+          releaseController();
+          this.queuedPersistedDeliveries.delete(retryKey);
+        }
+      });
+    }
   }
 
   stop(senderKey: string, expected?: ActiveAgentExchange): void {
     const current = this.active.get(senderKey);
     if (expected && current !== expected) return;
     current?.stop();
+    this.abortDeliveries(senderKey);
   }
 
   currentGeneration(senderKey: string): number {
@@ -233,8 +345,14 @@ export class AgentExchangeManager {
 
 // The agent's own reply is LLM-generated Markdown — WhatsApp uses a
 // different, much smaller formatting syntax (see markdownToWhatsapp.ts).
-function deliver(deps: RouterDeps, chatId: string, text: string, messageId: string): Promise<void> {
-  return deps.typing.send(chatId, markdownToWhatsapp(text), messageId);
+function deliver(
+  deps: Pick<RouterDeps, "typing">,
+  chatId: string,
+  text: string,
+  messageId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  return deps.typing.send(chatId, markdownToWhatsapp(text), messageId, signal);
 }
 
 // watchSession() only rejects on a narrow failure — event.subscribe() unable

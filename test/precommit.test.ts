@@ -16,6 +16,7 @@ beforeEach(() => {
   git("init", "-q");
   git("config", "user.email", "test@example.com");
   git("config", "user.name", "Test");
+  git("config", "commit.gpgsign", "false");
   mkdirSync(join(dir, ".githooks"));
   mkdirSync(join(dir, "src"));
   writeFileSync(join(dir, ".githooks/pre-commit"), readFileSync(fileURLToPath(new URL("../.githooks/pre-commit", import.meta.url))));
