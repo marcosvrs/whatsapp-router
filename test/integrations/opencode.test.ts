@@ -1479,6 +1479,41 @@ describe("OpencodeClient.watchSession", () => {
     stop();
   });
 
+  it("recovers a sole pending prompt destination when its user event was missed", async () => {
+    const source = fakeEventSource();
+    connectSource(source);
+    const onMessage = vi.fn();
+    const watch = await client().watchSession("ses_1", onMessage);
+    const release = watch.acquirePrompt("chat1");
+
+    source.push(textPartUpdated("assistant_missed_user", "part_assistant", "ses_1", "reply"));
+    source.push(assistantFinished("assistant_missed_user", "ses_1", "stop", "user_missed"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_missed_user", "reply", "chat1");
+    });
+    release?.();
+    const secondRelease = watch.acquirePrompt("chat2");
+    source.push({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "user_next",
+          sessionID: "ses_1",
+          role: "user",
+          system: "You are being reached over WhatsApp.",
+        },
+      },
+    });
+    source.push(textPartUpdated("user_next", "part_next", "ses_1", "next prompt"));
+    source.push(textPartUpdated("assistant_next", "part_next_reply", "ses_1", "next reply"));
+    source.push(assistantFinished("assistant_next", "ses_1", "stop", "user_next"));
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalledWith("assistant_next", "next reply", "chat2");
+    });
+    secondRelease?.();
+    watch.stop();
+  });
+
   it("processes text from message.part.delta after user metadata arrives", async () => {
     const source = fakeEventSource();
     connectSource(source);
