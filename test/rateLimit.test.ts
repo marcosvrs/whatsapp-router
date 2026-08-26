@@ -31,4 +31,11 @@ describe("RateLimiter", () => {
     expect(limiter.isLimited("a", now)).toBe(false);
     expect(limiter.isLimited("a", now + 1001)).toBe(false);
   });
+  it("allows a call exactly at the window boundary", () => {
+    const limiter = new RateLimiter(1, 1000);
+    const now = 1_000_000;
+    expect(limiter.isLimited("a", now)).toBe(false);
+    expect(limiter.isLimited("a", now + 1000)).toBe(false);
+  });
+
 });

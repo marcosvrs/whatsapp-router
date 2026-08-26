@@ -1,7 +1,39 @@
 #!/bin/sh
-# Lints staged .ts files only — a native equivalent of lint-staged, no dependency needed.
-set -e
-if git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | grep -qz .; then
-  git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | xargs -0 npx eslint --fix
-  git diff --cached --name-only --diff-filter=ACM -z -- '*.ts' | xargs -0 git add
+set -eu
+
+git_clean() {
+  env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE git "$@"
+}
+
+staged_ts=$(git diff --cached --name-only --diff-filter=ACMRTUXB -- '*.ts')
+if [ -n "$staged_ts" ]; then
+  # Paths in this repository do not contain whitespace; avoid npx so this
+  # hook cannot download or execute an unpinned package.
+  npm exec --offline -- eslint --fix -- $staged_ts
+  git add -- $staged_ts
 fi
+
+# Threshold ranges come from the index. Run the checks in a temporary worktree
+# containing exactly that index snapshot so unstaged tests cannot satisfy the
+# staged production change's coverage or mutation gate.
+snapshot_parent=$(mktemp -d "${TMPDIR:-/tmp}/whatsapp-router-precommit.XXXXXX")
+snapshot_dir="$snapshot_parent/worktree"
+patch_file="$snapshot_parent/staged.patch"
+git diff --cached --binary --no-ext-diff > "$patch_file"
+cleanup() {
+  git_clean worktree remove --force "$snapshot_dir" >/dev/null 2>&1 || true
+  rm -rf "$snapshot_parent"
+}
+trap cleanup EXIT
+
+git_clean worktree add --detach "$snapshot_dir" HEAD >/dev/null
+ln -s "$PWD/node_modules" "$snapshot_dir/node_modules"
+git_clean -C "$snapshot_dir" apply --index --whitespace=nowarn "$patch_file"
+(
+  unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE
+  cd "$snapshot_dir"
+  npm run test:thresholds:changed -- --staged
+)
+
+git diff --cached --check
+gitleaks protect --staged --redact

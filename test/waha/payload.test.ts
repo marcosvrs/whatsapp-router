@@ -8,11 +8,20 @@ import {
   messageDedupeKey,
   RECENT_MEDIA_MAX,
   selectRecentMedia,
+  stripJidSuffix,
   stripMentions,
   trimSinceLastMention,
   type WahaHistoryMessage,
   type WahaMessage,
 } from "../../src/waha/payload.js";
+
+describe("stripJidSuffix", () => {
+  it("removes a suffix and returns an empty string for missing input", () => {
+    expect(stripJidSuffix("123@lid")).toBe("123");
+    expect(stripJidSuffix("123")).toBe("123");
+    expect(stripJidSuffix(undefined)).toBe("");
+  });
+});
 
 function plainMessage(overrides: Partial<WahaMessage> = {}): WahaMessage {
   return { id: "msg1", from: "111@c.us", body: "hello", timestamp: 123, ...overrides };
@@ -60,6 +69,20 @@ describe("extractMentionedIds", () => {
   it("returns an empty array for a completely empty message object", () => {
     expect(extractMentionedIds({})).toEqual([]);
   });
+  it("handles null media message variants without throwing", () => {
+    expect(
+      extractMentionedIds({
+        _data: {
+          message: {
+            extendedTextMessage: undefined,
+            imageMessage: undefined,
+            documentMessage: undefined,
+            videoMessage: undefined,
+          },
+        },
+      }),
+    ).toEqual([]);
+  });
 
   it("extracts mentions from an image caption's contextInfo", () => {
     const msg = mediaCaptionMentionMessage("imageMessage", ["999888777666555@lid"]);
@@ -86,6 +109,16 @@ describe("extractMentionedIds", () => {
       },
     };
     expect(extractMentionedIds(msg)).toEqual(["1"]);
+  });
+
+  it("tolerates null caption context objects for every media variant", () => {
+    for (const kind of ["extendedTextMessage", "imageMessage", "documentMessage", "videoMessage"]) {
+      expect(
+        extractMentionedIds({
+          _data: { message: { [kind]: { contextInfo: null } } },
+        }),
+      ).toEqual([]);
+    }
   });
 });
 
@@ -152,6 +185,9 @@ describe("formatLocation", () => {
   it("falls back to just coordinates when there's no title", () => {
     expect(formatLocation({ latitude: 1.5, longitude: 2.5 })).toBe("1.5, 2.5");
   });
+  it("uses question marks for missing coordinates", () => {
+    expect(formatLocation({})).toBe("?, ?");
+  });
 });
 
 describe("hasDownloadableMedia", () => {
@@ -171,6 +207,9 @@ describe("hasDownloadableMedia", () => {
     expect(
       hasDownloadableMedia({ hasMedia: true, media: { url: "http://x/f.jpg", error: "boom" } }),
     ).toBe(false);
+  });
+  it("is false when media is missing despite hasMedia", () => {
+    expect(hasDownloadableMedia({ hasMedia: true, media: undefined })).toBe(false);
   });
 });
 
@@ -203,6 +242,18 @@ describe("formatRecentMessages", () => {
       historyMsg({ id: "h2", body: "", hasMedia: true, media: { mimetype: "application/pdf", url: "u" } }),
     ];
     expect(formatRecentMessages(messages, "")).toBe("Alex: [document]\nAlex: [image]");
+  });
+
+  it("labels a media message with no media metadata as generic media", () => {
+    expect(
+      formatRecentMessages([historyMsg({ body: "", hasMedia: true, media: undefined })], ""),
+    ).toBe("Alex: [media]");
+  });
+  it("skips a media message whose body is missing", () => {
+    expect(formatRecentMessages([historyMsg({ body: undefined })], "")).toBeUndefined();
+  });
+  it("trims surrounding whitespace from a history body", () => {
+    expect(formatRecentMessages([historyMsg({ body: "  padded text  " })], "")).toBe("Alex: padded text");
   });
 
   it("labels video and audio media by type, and falls back to [media] with no mimetype", () => {
@@ -244,6 +295,11 @@ describe("formatRecentMessages", () => {
     const result = formatRecentMessages(messages, "");
     expect(result?.split("\n")).toHaveLength(1);
   });
+  it("includes a message exactly at the character budget", () => {
+    const result = formatRecentMessages([historyMsg({ body: "x".repeat(2494) })], "");
+    expect(result).toHaveLength(2500);
+  });
+
 });
 
 describe("selectRecentMedia", () => {

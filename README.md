@@ -95,10 +95,15 @@ directly via native `fetch`.
 
 3. Run it:
 
+
    ```sh
    docker build -t whatsapp-router .
    docker run --env-file .env -p 8080:8080 -v "$(pwd)/state:/app/state" whatsapp-router
    ```
+
+`LOG_LEVEL` controls runtime verbosity: `debug`, `info`, `warn`, or `error`.
+It defaults to `info`; use `debug` while diagnosing webhook, SSE, delivery, or
+typing flows.
 
 ## Development
 

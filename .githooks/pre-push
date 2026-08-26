@@ -1,22 +1,44 @@
 #!/bin/sh
-# Secret scanning stays full-history (that's the whole point of it) — it's
-# fast (tens of ms), so scoping it wouldn't save anything meaningful anyway.
-set -e
-gitleaks detect --redact -v
+set -eu
 
-# Typecheck can't safely be scoped to just changed files — a change to a
-# shared type can break correctness elsewhere in the program without
-# touching that file's own text, and TypeScript's checking is inherently
-# whole-program. --incremental (tsconfig.json) caches unchanged files'
-# analysis instead, which is the correct/safe way to speed this up.
+git fetch origin main --quiet
+base_sha=$(git merge-base origin/main HEAD)
+
+# Secret scanning in the pushed commit range is fast; CI performs the full
+# history scan on the merge gate.
+gitleaks detect --source . --log-opts="${base_sha}..HEAD" --redact
+
 npm run typecheck
 
-# Tests actually CAN be safely scoped: only run tests affected by what's
-# changed since origin/main (via import-graph analysis), not the full suite.
-git fetch origin main --quiet || true
-npx vitest run --changed origin/main
+changed_files=$(git diff --name-only --diff-filter=ACMRTUXB "$base_sha" HEAD)
+changed_ts=$(git diff --name-only --diff-filter=ACMRTUXB "$base_sha" HEAD -- '*.ts')
+if [ -n "$changed_ts" ]; then
+  npm exec --offline -- eslint $changed_ts
+fi
 
-# Same idea for mutation testing, via Stryker's own incremental cache
-# (reports/stryker-incremental.json, gitignored) rather than a git diff —
-# it only re-mutates/re-tests what could have changed status since last run.
-npx stryker run --incremental
+full_test=false
+needs_build=false
+for changed_file in $changed_files; do
+  case "$changed_file" in
+    package.json|package-lock.json|.npmrc|tsconfig*.json|vitest.config.*|eslint.config.*|Dockerfile|.github/workflows/*|src/index.ts)
+      full_test=true
+      ;;
+  esac
+  case "$changed_file" in
+    src/*|tsconfig*.json)
+      needs_build=true
+      ;;
+  esac
+done
+
+if [ "$full_test" = true ]; then
+  npm test
+else
+  npm exec --offline -- vitest run --changed "$base_sha"
+fi
+
+npm run test:thresholds:changed -- --base "$base_sha"
+
+if [ "$needs_build" = true ]; then
+  npm run build
+fi

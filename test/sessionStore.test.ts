@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionStore } from "../src/sessionStore.js";
+import { isSessionRecord, SessionStore } from "../src/sessionStore.js";
 
 let dir: string;
 let filePath: string;
@@ -14,6 +14,17 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+});
+
+describe("isSessionRecord", () => {
+  it("accepts only non-null non-array objects", () => {
+    expect(isSessionRecord({})).toBe(true);
+    expect(isSessionRecord(null)).toBe(false);
+    expect(isSessionRecord([])).toBe(false);
+    expect(isSessionRecord("text")).toBe(false);
+    expect(isSessionRecord(42)).toBe(false);
+    expect(isSessionRecord(false)).toBe(false);
+  });
 });
 
 describe("SessionStore", () => {
@@ -66,9 +77,10 @@ describe("SessionStore", () => {
 
   it("starts empty when the file contains a JSON array instead of an object", () => {
     mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, "[]");
+    writeFileSync(filePath, '[{"sessionId":"not-a-valid-key"}]');
     const store = new SessionStore(filePath);
     expect(store.get("alice")).toBeUndefined();
+    expect(store.get("0")).toBeUndefined();
   });
 
   it("starts empty when the file contains a bare JSON null", () => {
@@ -83,6 +95,14 @@ describe("SessionStore", () => {
     writeFileSync(filePath, "42");
     const store = new SessionStore(filePath);
     expect(store.get("alice")).toBeUndefined();
+  });
+
+  it.each(['"text"', "true", '"session-like"'])("starts empty for a JSON primitive: %s", (json) => {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, json);
+    const store = new SessionStore(filePath);
+    expect(store.get("alice")).toBeUndefined();
+    expect(store.get("0")).toBeUndefined();
   });
 
   it("logs the exact failure message when the file can't be written", () => {

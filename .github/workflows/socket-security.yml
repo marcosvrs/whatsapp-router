@@ -1,0 +1,63 @@
+ # Socket Security scans run only from the protected main branch. Pull
+ # requests and arbitrary branch pushes are intentionally excluded because
+ # the scan requires a secret and executes against checked-out repository data.
+name: socket-security-workflow
+run-name: Socket Security Github Action
+
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Prevent concurrent runs for the same commit
+concurrency:
+  group: >-
+    socket-scan-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  socket-security:
+    if: github.ref_name == 'main'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # For PRs, fetch one additional commit for proper diff analysis
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned Socket CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="${RUNNER_TEMP}/socket-wheels"
+          python -m pip download \
+            --only-binary=:all: \
+            --require-hashes \
+            --dest "$wheel_dir" \
+            -r .github/socket-security-requirements.txt
+          python -m pip install \
+            --no-index \
+            --find-links "$wheel_dir" \
+            --require-hashes \
+            -r .github/socket-security-requirements.txt
+          python -m pip check
+
+      - name: Run Socket Security Scan
+        env:
+          SOCKET_SECURITY_API_KEY: ${{ secrets.SOCKET_SECURITY_API_KEY }}
+          GH_API_TOKEN: ${{ github.token }}
+        run: |
+          PR_NUMBER=0
+
+          socketcli \
+            --target-path "$GITHUB_WORKSPACE" \
+            --scm github \
+            --pr-number "$PR_NUMBER"

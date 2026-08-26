@@ -1,13 +1,13 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { log } from "./log.js";
+import { error } from "./log.js";
 
 interface SessionEntry {
   sessionId: string;
 }
 
-function isSessionRecord(value: unknown): value is Record<string, SessionEntry> {
-  return typeof value === "object" && value !== null;
+export function isSessionRecord(value: unknown): value is Record<string, SessionEntry> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function loadFromDisk(filePath: string): Map<string, SessionEntry> {
@@ -48,7 +48,7 @@ export class SessionStore {
       mkdirSync(dirname(this.filePath), { recursive: true });
       writeFileSync(this.filePath, JSON.stringify(Object.fromEntries(this.sessions)));
     } catch (err) {
-      log("saveSessions failed", err instanceof Error ? err.message : String(err));
+      error("saveSessions failed", err instanceof Error ? err.message : String(err));
     }
   }
 }

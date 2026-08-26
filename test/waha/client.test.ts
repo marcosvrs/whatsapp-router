@@ -50,7 +50,7 @@ describe("WahaClient.sendText", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
 
     const client = new WahaClient("http://waha.test", "key123", "MySession");
-    await expect(client.sendText("111@c.us", "hello")).resolves.toBeUndefined();
+    await expect(client.sendText("111@c.us", "hello")).rejects.toThrow("sendText failed with HTTP 500");
 
     expect(logSpy).toHaveBeenCalledTimes(1);
     const args = logSpy.mock.calls[0] as unknown[];
@@ -65,6 +65,17 @@ describe("WahaClient.sendText", () => {
     expect(logSpy).not.toHaveBeenCalled();
   });
 
+  it("passes an abort signal through the signal-aware send method", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+
+    await client.sendTextWithSignal("111@c.us", "hello", "id1", signal);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBe(signal);
+  });
   it("falls back to an empty string when reading the failure body itself rejects", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const badResponse = new Response(null, { status: 500 });
@@ -72,7 +83,7 @@ describe("WahaClient.sendText", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(badResponse));
 
     const client = new WahaClient("http://waha.test", "key123", "MySession");
-    await client.sendText("111@c.us", "hello");
+    await expect(client.sendText("111@c.us", "hello")).rejects.toThrow("sendText failed with HTTP 500");
 
     const args = logSpy.mock.calls[0] as unknown[];
     expect(args.slice(1)).toEqual(["sendText failed", 500, ""]);
@@ -94,12 +105,47 @@ describe("WahaClient.startTyping", () => {
     expect(JSON.parse(init.body as string)).toEqual({ session: "MySession", chatId: "111@c.us" });
   });
 
+  it("passes an abort signal through to startTyping when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const signal = new AbortController().signal;
+
+    await new WahaClient("http://waha.test", "key123", "MySession").startTyping("111@c.us", signal);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.signal).toBe(signal);
+  });
+
   it("logs on failure", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
     const client = new WahaClient("http://waha.test", "key123", "MySession");
     await client.startTyping("111@c.us");
     expect(logSpy.mock.calls[0]?.slice(1)).toEqual(["startTyping failed", 500, "oops"]);
+  });
+});
+
+describe("WahaClient.stopTyping", () => {
+  it("posts to /api/stopTyping with the session and chatId", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.stopTyping("111@c.us");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://waha.test/api/stopTyping");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({ "Content-Type": "application/json", "X-Api-Key": "key123" });
+    expect(JSON.parse(init.body as string)).toEqual({ session: "MySession", chatId: "111@c.us" });
+  });
+
+  it("logs on failure", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("oops", { status: 500 })));
+    const client = new WahaClient("http://waha.test", "key123", "MySession");
+    await client.stopTyping("111@c.us");
+    expect(logSpy.mock.calls[0]?.slice(1)).toEqual(["stopTyping failed", 500, "oops"]);
   });
 });
 

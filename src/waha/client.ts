@@ -1,4 +1,4 @@
-import { log } from "../log.js";
+import { error } from "../log.js";
 import type { WahaHistoryMessage } from "./payload.js";
 
 export interface WahaGroupParticipant {
@@ -19,8 +19,10 @@ export interface WahaSessionInfo {
 }
 
 export interface WahaClientLike {
-  sendText: (chatId: string, text: string, id?: string) => Promise<void>;
-  startTyping: (chatId: string) => Promise<void>;
+  sendText: (chatId: string, text: string, id?: string, signal?: AbortSignal) => Promise<void>;
+  sendTextWithSignal?: (chatId: string, text: string, id: string | undefined, signal: AbortSignal) => Promise<void>;
+  startTyping: (chatId: string, signal?: AbortSignal) => Promise<void>;
+  stopTyping: (chatId: string, signal?: AbortSignal) => Promise<void>;
   markChatRead: (chatId: string) => Promise<void>;
   sendReaction: (messageId: string, reaction: string) => Promise<void>;
   editMessage: (chatId: string, messageId: string, text: string) => Promise<void>;
@@ -37,33 +39,52 @@ export class WahaClient implements WahaClientLike {
     private readonly session: string,
   ) {}
 
-  private call(method: string, path: string, body: unknown): Promise<Response> {
+  private call(method: string, path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
     return fetch(`${this.baseUrl}${path}`, {
       method,
       headers: { "Content-Type": "application/json", "X-Api-Key": this.apiKey },
       body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
     });
   }
 
   private async logIfFailed(action: string, res: Response): Promise<void> {
     if (!res.ok) {
-      log(`${action} failed`, res.status, await res.text().catch(() => ""));
+      error(`${action} failed`, res.status, await res.text().catch(() => ""));
     }
   }
 
-  async sendText(chatId: string, text: string, id?: string): Promise<void> {
-    const res = await this.call("POST", "/api/sendText", {
-      session: this.session,
-      chatId,
-      text,
-      ...(id ? { id } : {}),
-    });
+  async sendText(chatId: string, text: string, id?: string, signal?: AbortSignal): Promise<void> {
+    const res = await this.call(
+      "POST",
+      "/api/sendText",
+      {
+        session: this.session,
+        chatId,
+        text,
+        ...(id ? { id } : {}),
+      },
+      signal,
+    );
     await this.logIfFailed("sendText", res);
+    if (!res.ok) throw new Error(`sendText failed with HTTP ${String(res.status)}`);
   }
 
-  async startTyping(chatId: string): Promise<void> {
-    const res = await this.call("POST", "/api/startTyping", { session: this.session, chatId });
+  async sendTextWithSignal(chatId: string, text: string, id: string | undefined, signal: AbortSignal): Promise<void> {
+    await this.sendText(chatId, text, id, signal);
+  }
+
+  async startTyping(chatId: string, signal?: AbortSignal): Promise<void> {
+    const res = await this.call("POST", "/api/startTyping", { session: this.session, chatId }, signal);
     await this.logIfFailed("startTyping", res);
+  }
+
+  // WAHA's own docs recommend pairing this with startTyping — startTyping,
+  // wait, stopTyping, then sendText — to avoid looking spammy. Confirmed live
+  // against this WAHA instance (2026.7.2): returns 201.
+  async stopTyping(chatId: string, signal?: AbortSignal): Promise<void> {
+    const res = await this.call("POST", "/api/stopTyping", { session: this.session, chatId }, signal);
+    await this.logIfFailed("stopTyping", res);
   }
 
   async markChatRead(chatId: string): Promise<void> {
@@ -126,12 +147,12 @@ export class WahaClient implements WahaClientLike {
         headers: { "X-Api-Key": this.apiKey },
       });
       if (!res.ok) {
-        log("downloadMedia failed", res.status, await res.text().catch(() => ""));
+        error("downloadMedia failed", res.status, await res.text().catch(() => ""));
         return null;
       }
       return Buffer.from(await res.arrayBuffer()).toString("base64");
     } catch (err) {
-      log("downloadMedia failed", err instanceof Error ? err.message : String(err));
+      error("downloadMedia failed", err instanceof Error ? err.message : String(err));
       return null;
     }
   }

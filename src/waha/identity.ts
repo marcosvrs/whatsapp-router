@@ -1,4 +1,4 @@
-import { log } from "../log.js";
+import { info as logInfo, warn } from "../log.js";
 import type { WahaClientLike } from "./client.js";
 import { stripJidSuffix } from "./payload.js";
 
@@ -42,9 +42,9 @@ export class Identity implements IdentityResolver {
       this.lidToPhone = map;
       this.groupNames = names;
       this.lidMapLoadedAt = Date.now();
-      log("lid map refreshed", map.size, "entries");
+      logInfo("lid map refreshed", map.size, "entries");
     } catch (err) {
-      log("lid map refresh failed", err instanceof Error ? err.message : String(err));
+      warn("lid map refresh failed", err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -73,9 +73,9 @@ export class Identity implements IdentityResolver {
       if (info.me?.id) this.botIds.add(stripJidSuffix(info.me.id));
       if (info.me?.lid) this.botIds.add(stripJidSuffix(info.me.lid));
       this.botIdsLoaded = true;
-      log("bot ids loaded", [...this.botIds].join(","));
+      logInfo("bot ids loaded", [...this.botIds].join(","));
     } catch (err) {
-      log("bot ids load failed", err instanceof Error ? err.message : String(err));
+      warn("bot ids load failed", err instanceof Error ? err.message : String(err));
     }
   }
 
