@@ -1098,6 +1098,40 @@ describe("routeMessage — agent context", () => {
     });
     acquired.exchange.stop();
   });
+  it("does not replay a delivery still owned by a settled exchange", async () => {
+    let release!: () => void;
+    const send = vi.spyOn(deps.typing, "send").mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const makeWatch = () => ({
+      awaitIdle: () => Promise.resolve(),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    });
+    vi.spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(makeWatch())
+      .mockResolvedValueOnce(makeWatch());
+    const manager = new AgentExchangeManager();
+    const first = await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    first.exchange.deliver("owned", "old reply", "chat1");
+    await vi.waitFor(() => {
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+    await first.exchange.done;
+    const second = await manager.acquire(deps, "111", "ses_1", "chat1");
+    second.exchange.deliver("owned", "new observation", "chat1");
+    expect(send).toHaveBeenCalledTimes(1);
+    release();
+    await vi.waitFor(() => {
+      expect(deps.deliveryRetries.list("111")).toEqual([]);
+    });
+    second.exchange.stop();
+  });
 
   it("removes an exhausted persisted delivery during startup drain", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);

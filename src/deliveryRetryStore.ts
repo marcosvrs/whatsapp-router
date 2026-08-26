@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { error } from "./log.js";
 
@@ -67,7 +67,9 @@ export class DeliveryRetryStore {
   private save(): void {
     try {
       mkdirSync(dirname(this.filePath), { recursive: true });
-      writeFileSync(this.filePath, JSON.stringify([...this.entries.values()]));
+      const tempPath = `${this.filePath}.tmp`;
+      writeFileSync(tempPath, JSON.stringify([...this.entries.values()]));
+      renameSync(tempPath, this.filePath);
     } catch (err) {
       error("saveDeliveryRetries failed", err instanceof Error ? err.message : String(err));
     }

@@ -724,7 +724,7 @@ export class OpencodeClient {
       settleTurnWaiters(messageId);
     };
     const hasTrackedWork = (): boolean =>
-      sessionBusy || backgroundWorkPending || promptLeases > 0 || idleCandidateTimer !== undefined;
+      sessionBusy || backgroundWorkPending || promptLeases > 0 || idleCandidateTimer !== undefined || promptMayStartBackgroundWork;
     resetQuietTimer();
     const processUserMessageState = (
       messageId: string,

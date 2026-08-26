@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -42,6 +42,19 @@ describe("DeliveryRetryStore", () => {
     const store = new DeliveryRetryStore(dir);
     store.set({ senderKey: "111", messageId: "msg_1", text: "hello", chatId: "chat1", attempts: 0 });
     expect(store.list("111")).toHaveLength(1);
+  });
+
+  it("keeps the last valid snapshot when a replacement write fails", () => {
+    const filePath = join(dir, "retries.json");
+    const store = new DeliveryRetryStore(filePath);
+    store.set({ senderKey: "111", messageId: "msg_1", text: "original", chatId: "chat1", attempts: 0 });
+    mkdirSync(`${filePath}.tmp`);
+
+    store.set({ senderKey: "111", messageId: "msg_2", text: "replacement", chatId: "chat1", attempts: 0 });
+
+    expect(new DeliveryRetryStore(filePath).list("111")).toEqual([
+      { senderKey: "111", messageId: "msg_1", text: "original", chatId: "chat1", attempts: 0 },
+    ]);
   });
   it("ignores malformed persisted payloads", () => {
     const arrayPath = join(dir, "malformed-array.json");

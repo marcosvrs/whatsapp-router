@@ -110,7 +110,7 @@ export class AgentExchangeManager {
   private readonly generations = new Map<string, number>();
   private readonly deliveryTails = new Map<string, Promise<void>>();
   private readonly deliveryControllers = new Map<string, Set<AbortController>>();
-  private readonly queuedPersistedDeliveries = new Set<string>();
+  private readonly deliveryOwners = new Set<string>();
 
   private queueDelivery(chatId: string, task: () => Promise<void>): void {
     const previous = this.deliveryTails.get(chatId) ?? Promise.resolve();
@@ -186,7 +186,10 @@ export class AgentExchangeManager {
         });
         return;
       }
+      const ownerKey = `${senderKey}:${messageId}`;
+      if (this.deliveryOwners.has(ownerKey)) return;
       const delivery: PendingDelivery = { text, chatId: destinationChatId, attempts };
+      this.deliveryOwners.add(ownerKey);
       const controller = new AbortController();
       const releaseController = this.trackController(senderKey, controller);
       exchangeControllers.add(controller);
@@ -194,6 +197,7 @@ export class AgentExchangeManager {
         exchangeControllers.delete(controller);
         releaseController();
         inFlight.delete(messageId);
+        this.deliveryOwners.delete(ownerKey);
       };
       deps.deliveryRetries.set({ senderKey, messageId, text, chatId: destinationChatId, attempts });
       debug("agent turn delivery queued", messageId, destinationChatId);
@@ -277,7 +281,7 @@ export class AgentExchangeManager {
     this.active.set(senderKey, exchange);
     for (const retry of deps.deliveryRetries.list(senderKey)) {
       const retryKey = `${senderKey}:${retry.messageId}`;
-      if (this.queuedPersistedDeliveries.has(retryKey)) continue;
+      if (this.deliveryOwners.has(retryKey)) continue;
       enqueueDelivery(retry.messageId, retry.text, retry.chatId, retry.attempts);
     }
     const release = exchange.acquirePrompt(chatId) ?? (() => undefined);
@@ -287,8 +291,8 @@ export class AgentExchangeManager {
   drainPersistedDeliveries(deps: Pick<RouterDeps, "typing" | "deliveryRetries">): void {
     for (const entry of deps.deliveryRetries.listAll()) {
       const retryKey = `${entry.senderKey}:${entry.messageId}`;
-      if (this.queuedPersistedDeliveries.has(retryKey)) continue;
-      this.queuedPersistedDeliveries.add(retryKey);
+      if (this.deliveryOwners.has(retryKey)) continue;
+      this.deliveryOwners.add(retryKey);
       const controller = new AbortController();
       const releaseController = this.trackController(entry.senderKey, controller);
       this.queueDelivery(entry.chatId, async () => {
@@ -318,8 +322,8 @@ export class AgentExchangeManager {
           deps.deliveryRetries.delete(entry.senderKey, entry.messageId);
           error("agent turn delivery retries exhausted", entry.messageId);
         } finally {
+          this.deliveryOwners.delete(retryKey);
           releaseController();
-          this.queuedPersistedDeliveries.delete(retryKey);
         }
       });
     }

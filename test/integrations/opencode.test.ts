@@ -1055,6 +1055,30 @@ describe("OpencodeClient.watchSession", () => {
     ]);
   });
 
+  it("keeps watching when a prompt may start background work across stream loss", async () => {
+    const first = fakeEventSource();
+    const second = fakeEventSource();
+    eventSubscribe
+      .mockImplementationOnce(() => {
+        first.push({ type: "server.connected", properties: {} });
+        return { stream: first.stream };
+      })
+      .mockImplementationOnce(() => {
+        second.push({ type: "server.connected", properties: {} });
+        return { stream: second.stream };
+      });
+    const watch = await client().watchSession("ses_1", vi.fn());
+    const release = watch.acquirePrompt("chat1");
+
+    watch.markPromptCompleted("chat1", true);
+    release?.();
+    first.end();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(eventSubscribe).toHaveBeenCalledTimes(2);
+    watch.stop();
+    second.end();
+  });
+
   it("reconnects during post-prompt grace before a detached-work marker", async () => {
     const first = fakeEventSource();
     const second = fakeEventSource();
