@@ -5,6 +5,7 @@ const workflows = [
   ".github/workflows/lint-build-test.yaml",
   ".github/workflows/mutation-testing.yaml",
 ].map((path) => ({ path, source: readFileSync(new URL(`../${path}`, import.meta.url), "utf8") }));
+const lintBuildTestWorkflow = workflows.find(({ path }) => path.endsWith("lint-build-test.yaml"))?.source ?? "";
 const socketWorkflow = readFileSync(
   new URL("../.github/workflows/socket-security.yml", import.meta.url),
   "utf8",
@@ -22,6 +23,9 @@ describe("pull request workflow runner security", () => {
       /runs-on:\s*\$\{\{\s*github\.event_name == 'pull_request'\s*&&\s*'ubuntu-latest'\s*\|\|\s*'self-hosted'\s*\}\}/,
     );
     expect(source).not.toMatch(/runs-on:\s*self-hosted\s*$/m);
+  });
+  it("clears stale Gitleaks download state on self-hosted runners", () => {
+    expect(lintBuildTestWorkflow).toContain("rm -f /tmp/gitleaks.tmp");
   });
 });
 describe("secret-bearing Socket workflow security", () => {
