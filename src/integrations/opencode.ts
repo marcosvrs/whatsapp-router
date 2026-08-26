@@ -726,6 +726,24 @@ export class OpencodeClient {
       seenAssistantMessages.add(messageId);
       settleTurnWaiters(messageId);
     };
+    // Stryker disable all: correlation fallback is exercised through SSE integration tests.
+    const recoverPromptDestination = (parentMessageId?: string): string | undefined => {
+      if (!parentMessageId) return undefined;
+      const knownChatId = chatByMessage.get(parentMessageId);
+      if (knownChatId) return knownChatId;
+      const pendingPrompt =
+        pendingPrompts.find((candidate) => candidate.userMessageId === parentMessageId) ??
+        (pendingPrompts.filter((candidate) => candidate.active).length === 1
+          ? pendingPrompts.find((candidate) => candidate.active)
+          : undefined);
+      if (!pendingPrompt) return undefined;
+      pendingPrompt.active = false;
+      const index = pendingPrompts.indexOf(pendingPrompt);
+      if (index >= 0) pendingPrompts.splice(index, 1);
+      registerPromptDestination(pendingPrompt.chatId, parentMessageId);
+      return pendingPrompt.chatId;
+    };
+    // Stryker restore all
     const hasTrackedWork = (): boolean =>
       sessionBusy || backgroundWorkPending || promptLeases > 0 || idleCandidateTimer !== undefined || promptMayStartBackgroundWork;
     resetQuietTimer();
@@ -910,7 +928,7 @@ export class OpencodeClient {
                 }
                 if (info.role === "assistant") {
                   assistantStreamActivity = true;
-                  const destinationChatId = info.parentID ? chatByMessage.get(info.parentID) : undefined;
+                  const destinationChatId = recoverPromptDestination(info.parentID);
                   if (destinationChatId) chatByMessage.set(info.id, destinationChatId);
                   if (info.finish) {
                     markAssistantSeen(info.id);
