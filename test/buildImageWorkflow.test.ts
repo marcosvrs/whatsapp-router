@@ -20,4 +20,8 @@ describe("image publishing workflow", () => {
     expect(workflow).toContain("github.event.workflow_run.head_sha");
     expect(workflow).toContain("github.event.workflow_run.event == 'push'");
   });
+  it("sets up a non-docker Buildx driver before exporting the GHA cache", () => {
+    expect(workflow).toContain("docker/setup-buildx-action@");
+    expect(workflow).toMatch(/setup-buildx-action@[\da-f]{40}/);
+  });
 });
