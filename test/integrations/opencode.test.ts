@@ -1035,8 +1035,10 @@ describe("OpencodeClient.watchSession", () => {
     const watch = await client().watchSession("ses_1", onMessage);
     const release = watch.acquirePrompt("chat1");
 
+    const reconnectReady = watch.awaitConnected?.();
     first.end();
     await vi.advanceTimersByTimeAsync(1_000);
+    await reconnectReady;
     expect(eventSubscribe).toHaveBeenCalledTimes(2);
 
     second.push(textPartUpdated("msg_1", "part_1", "ses_1", "after reconnect"));

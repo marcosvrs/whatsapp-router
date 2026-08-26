@@ -88,6 +88,7 @@ export interface ActiveAgentExchange {
   readonly sessionId: string;
   reusable?: boolean;
   readonly isLive?: boolean;
+  awaitConnected?: () => Promise<void>;
   readonly done: Promise<void>;
   acquirePrompt: (chatId: string) => ((cancel?: boolean, userMessageId?: string) => void) | undefined;
   awaitChatIdle?: (chatId: string) => Promise<void>;
@@ -165,6 +166,11 @@ export class AgentExchangeManager {
     const current = this.active.get(senderKey);
     const generation = this.currentGeneration(senderKey);
     if (current?.sessionId === sessionId && current.reusable !== false) {
+      try {
+        await current.awaitConnected?.();
+      } catch {
+        current.stop(false);
+      }
       const release = current.acquirePrompt(chatId);
       if (release) return { exchange: current, created: false, release };
     }
@@ -272,6 +278,7 @@ export class AgentExchangeManager {
     });
     const exchange: ActiveAgentExchange = {
       sessionId,
+      awaitConnected: watch.awaitConnected,
       isLive: watch.isLive,
       reusable: true,
       done,

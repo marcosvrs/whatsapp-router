@@ -601,6 +601,65 @@ describe("routeMessage — agent context", () => {
       expect.objectContaining({ media: undefined }),
     );
   });
+  it("waits for a reused watcher to reconnect before leasing a prompt", async () => {
+    let releaseConnected!: () => void;
+    const awaitConnected = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseConnected = resolve;
+        }),
+    );
+    const acquirePrompt = vi.fn(() => () => undefined);
+    const watch = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      awaitConnected,
+      acquirePrompt,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession").mockResolvedValue(watch);
+    const manager = new AgentExchangeManager();
+    await manager.acquire(deps, "111", "ses_1", "chat1");
+
+    const second = manager.acquire(deps, "111", "ses_1", "chat2");
+    await vi.waitFor(() => {
+      expect(awaitConnected).toHaveBeenCalledTimes(1);
+    });
+    expect(acquirePrompt).toHaveBeenCalledTimes(1);
+    releaseConnected();
+    const acquired = await second;
+    expect(acquired.created).toBe(false);
+    expect(acquirePrompt).toHaveBeenCalledTimes(2);
+    manager.stop("111", acquired.exchange);
+  });
+  it("replaces a watcher when readiness fails before a reused lease", async () => {
+    const firstStop = vi.fn();
+    const first = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      awaitConnected: () => Promise.reject(new Error("reconnect failed")),
+      acquirePrompt: () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: firstStop,
+    };
+    const second = {
+      awaitIdle: () => new Promise<void>(() => undefined),
+      acquirePrompt: () => () => undefined,
+      markPromptCompleted: vi.fn(),
+      stop: vi.fn(),
+    };
+    vi.spyOn(deps.opencode, "watchSession")
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const manager = new AgentExchangeManager();
+    await manager.acquire(deps, "111", "ses_1", "chat1");
+    const replacement = await manager.acquire(deps, "111", "ses_1", "chat2");
+
+    expect(replacement.created).toBe(true);
+    expect(firstStop).toHaveBeenCalled();
+    replacement.exchange.stop();
+  });
+
+
   it("delivers reused exchange replies to the latest destination chat", async () => {
     deps.sessions.set("111", "ses_1");
     let release!: () => void;

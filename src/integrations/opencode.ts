@@ -223,6 +223,7 @@ interface GlobalEventListener {
 interface GlobalEventSubscription {
   stream: AsyncIterable<unknown>;
   connected: Promise<void>;
+  waitUntilConnected: () => Promise<void>;
   unsubscribe: () => void;
 }
 
@@ -263,9 +264,11 @@ export class GlobalEventHub {
       });
     }
 
-    const connected = this.connected
-      ? Promise.resolve()
-      : new Promise<void>((resolve, reject) => this.connectionWaiters.set(listener, { resolve, reject }));
+    const waitUntilConnected = (): Promise<void> =>
+      this.connected
+        ? Promise.resolve()
+        : new Promise<void>((resolve, reject) => this.connectionWaiters.set(listener, { resolve, reject }));
+    const connected = waitUntilConnected();
     const unsubscribe = (): void => {
       const waiter = this.connectionWaiters.get(listener);
       if (waiter) {
@@ -280,7 +283,7 @@ export class GlobalEventHub {
         this.connectionTimer = undefined;
       }
     };
-    return { stream: listener.queue, connected, unsubscribe };
+    return { stream: listener.queue, connected, waitUntilConnected, unsubscribe };
   }
 
   private markConnected(): void {
@@ -417,7 +420,7 @@ export interface OpencodeSessionWatch {
   // happened via onMessage as each turn completed. Declared as function-type
   // properties, not method shorthand — these are plain closures with no
   // `this` binding, and method shorthand makes eslint's unbound-method rule
-  // flag them as unsafe to destructure even though they aren't.
+  awaitConnected?: () => Promise<void>;
   awaitIdle: () => Promise<void>;
   // False means SSE setup failed and no live watcher retained the prompt.
   isLive?: boolean;
@@ -1022,6 +1025,7 @@ export class OpencodeClient {
       get isLive(): boolean {
         return live;
       },
+      awaitConnected: subscription.waitUntilConnected,
       awaitIdle: () => idlePromise,
       awaitChatIdle,
       awaitTurn,
