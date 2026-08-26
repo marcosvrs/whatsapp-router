@@ -759,8 +759,7 @@ export class OpencodeClient {
           // Unparented completion markers are emitted after the task result
           // queue has been populated. Preserve the latest pending task rather
           // than dropping its child turn when several tasks overlap.
-          const destination =
-            linkedDestination ?? (candidates.length === 1 ? candidates[0] : candidates.at(-1));
+          const destination = linkedDestination ?? candidates.at(-1);
           if (destination) {
             destination.pending = false;
             chatByMessage.set(messageId, destination.chatId);
